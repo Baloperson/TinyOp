@@ -1,426 +1,199 @@
+// tinyset.js - v2.3s
 export function createStore(options = {}) {
-    // ==================== STORAGE ====================
-    const items = new Map()              // id -> item
-    const indexes = new Map()             // type/spatial -> Set<id>
-    const listeners = new Map()            // event -> Set<callback>
-    let transactionStack = []               // nested transactions
+    const items = new Map(), meta = new Map(), listeners = new Map()
+    const indexes = { type: new Map(), spatial: new Map(), coords: new Map() }
     
-    // ==================== CONFIG ====================
     const config = {
-        idGenerator: () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        validateTypes: true,
-        ...options
+        idGen: options.idGenerator || (() => 
+            `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`),
+        types: options.types || new Set(),
+        defaults: options.defaults || {},
+        grid: options.spatialGridSize || 100
     }
-    
-    // ==================== DEFAULTS ====================
-    const defaults = {
-        graph: { x: 0, y: 0, width: 400, height: 300, equations: [] },
-        viewport: { x: 0, y: 0, width: 800, height: 600, contains: [] },
-        text: { x: 0, y: 0, width: 300, height: 200, content: '' },
-        ...options.defaults
+    meta.set('config', config)
+
+    const ops = {
+        $gt: (a,b)=>a>b, $lt: (a,b)=>a<b, $gte: (a,b)=>a>=b, $lte: (a,b)=>a<=b,
+        $eq: (a,b)=>a===b, $ne: (a,b)=>a!==b, $in: (a,b)=>b?.includes?.(a),
+        $nin: (a,b)=>!b?.includes?.(a), $contains: (a,b)=>String(a).includes(b),
+        $startsWith: (a,b)=>String(a).startsWith(b), $endsWith: (a,b)=>String(a).endsWith(b),
+        $exists: a=>a!==undefined
     }
-    
-    // ==================== PUBLIC API ====================
-    
-    function create(spec, props = {}) {
-        // Batch creation
-        if (Array.isArray(spec)) {
-            return spec.map(s => create(
-                Array.isArray(s) ? s[0] : s,
-                Array.isArray(s) ? s[1] : {}
-            ))
+
+    const m = (item, f) => {
+        for (const k in f) {
+            const c = f[k], v = item[k]
+            if (c?.constructor === Object) {
+                for (const o in c) 
+                    if ((o=='$exists') ? (v!==undefined)!=c[o] : !ops[o]?.(v,c[o])) 
+                        return 0
+            } else if (v !== c) return 0
         }
-        
-        const type = spec
-        const id = props.id || config.idGenerator()
-        
-        if (config.validateTypes && !defaults[type]) {
-            console.warn(`Tinyset: Unknown type "${type}"`)
-        }
-        
-        const item = {
-            id,
-            type,
-            ...(defaults[type] || {}),
-            ...props,
-            created: Date.now(),
-            modified: Date.now()
-        }
-        
-        items.set(id, item)
-        updateIndexes('add', item)
-        emit('create', item)
-        emit('change', { type: 'create', item })
-        recordTransaction('create', { id, item: { ...item } })
-        
-        return item
+        return 1
     }
-    
-    function get(identifier, options = {}) {
-        // All items
-        if (identifier === undefined) {
-            return Array.from(items.values())
+
+    const ui = (action, item, old) => {
+        let t = indexes.type.get(item.type)
+        if (!t) indexes.type.set(item.type, t = new Set())
+        if (action == 'add') t.add(item.id)
+        else if (action == 'remove') t.delete(item.id)
+        else if (action == 'update' && old?.type !== item.type) {
+            indexes.type.get(old.type)?.delete(item.id)
+            t.add(item.id)
         }
         
-        // Get by type
-        if (typeof identifier === 'string' && !items.has(identifier)) {
-            return find(identifier, {}, options)
-        }
-        
-        // Get multiple by IDs
-        if (Array.isArray(identifier)) {
-            return identifier.map(id => items.get(id)).filter(Boolean)
-        }
-        
-        // Single by ID
-        const item = items.get(identifier)
-        if (!item) return options.exists ? false : null
-        
-        if (options.exists) return true
-        if (options.raw) return item
-        if (options.fields) {
-            return Object.fromEntries(
-                options.fields.map(f => [f, item[f]])
-            )
-        }
-        
-        return { ...item }
-    }
-    
-    function set(target, propOrProps, value, options = {}) {
-        // Batch array
-        if (Array.isArray(target)) {
-            return target.map(t => set(t, propOrProps, value, options))
-        }
-        
-        // Object map { id: props }
-        if (typeof target === 'object' && !Array.isArray(target)) {
-            const results = {}
-            for (const [id, props] of Object.entries(target)) {
-                results[id] = set(id, props, null, options)
-            }
-            return results
-        }
-        
-        // Single item
-        const id = typeof target === 'string' ? target : target.id
-        const item = items.get(id)
-        if (!item) return null
-        
-        const oldItem = { ...item }
-        const changes = {}
-        
-        if (typeof propOrProps === 'string' && value !== undefined) {
-            // Relative update ('+50', '-20', '*2', '/2')
-            if (typeof value === 'string' && '+-*/'.includes(value[0])) {
-                const op = value[0]
-                const amount = parseFloat(value.slice(1))
-                const current = item[propOrProps] || 0
-                
-                if (op === '+') item[propOrProps] = current + amount
-                else if (op === '-') item[propOrProps] = current - amount
-                else if (op === '*') item[propOrProps] = current * amount
-                else if (op === '/') item[propOrProps] = current / amount
-                
-                changes[propOrProps] = value
-            }
-            // Function update
-            else if (typeof value === 'function') {
-                item[propOrProps] = value(item[propOrProps])
-                changes[propOrProps] = '(function)'
-            }
-            // Deep path
-            else if (propOrProps.includes('.')) {
-                const parts = propOrProps.split('.')
-                const last = parts.pop()
-                let obj = item
-                for (const part of parts) {
-                    obj = obj[part] || (obj[part] = {})
-                }
-                obj[last] = value
-                changes[propOrProps] = value
-            }
-            // Normal assignment
-            else {
-                item[propOrProps] = value
-                changes[propOrProps] = value
-            }
-        } else if (typeof propOrProps === 'object') {
-            // Batch update
-            Object.assign(changes, propOrProps)
-            for (const [k, v] of Object.entries(propOrProps)) {
-                set(id, k, v, { ...options, silent: true })
-            }
-        }
-        
-        item.modified = Date.now()
-        
-        // Update spatial index if position changed
-        if (changes.x !== undefined || changes.y !== undefined) {
-            updateIndexes('update', item, oldItem)
-        }
-        
-        if (!options.silent) {
-            emit('update', { id, old: oldItem, new: item, changes })
-            emit('change', { type: 'update', id, old: oldItem, new: item })
-        }
-        
-        recordTransaction('update', { id, old: oldItem, new: { ...item } })
-        
-        // Return rollback function
-        return () => set(id, oldItem, null, { silent: true })
-    }
-    
-    function remove(target, options = {}) {
-        // Dry run
-        if (options.dryRun) {
-            if (typeof target === 'string') {
-                return items.has(target) ? [target] : []
-            }
-            return Array.from(items.keys())
-        }
-        
-        const deleted = []
-        
-        // Delete by type with condition
-        if (typeof target === 'string' && !items.has(target)) {
-            const toDelete = find(target, options.where || {})
-            for (const item of toDelete) {
-                if (deleteOne(item.id, options)) {
-                    deleted.push(item)
+        if (item.x != null) {
+            const g = config.grid, key = `${Math.floor(item.x/g)},${Math.floor(item.y/g)}`
+            indexes.coords.set(item.id, { x: item.x, y: item.y })
+            if (action == 'add') {
+                if (!indexes.spatial.has(key)) indexes.spatial.set(key, new Set())
+                indexes.spatial.get(key).add(item.id)
+            } else if (action == 'remove') {
+                indexes.spatial.get(key)?.delete(item.id)
+                indexes.coords.delete(item.id)
+            } else if (action == 'update' && old) {
+                const oldKey = `${Math.floor(old.x/g)},${Math.floor(old.y/g)}`
+                if (oldKey !== key) {
+                    indexes.spatial.get(oldKey)?.delete(item.id)
+                    if (!indexes.spatial.has(key)) indexes.spatial.set(key, new Set())
+                    indexes.spatial.get(key).add(item.id)
                 }
             }
-            return deleted
         }
+    }
+
+    const e = (event, data) => listeners.get(event)?.forEach(cb => { try { cb(data) } catch {} })
+
+    const sq = (type, x, y, maxDist, filter = {}) => {
+        const ts = indexes.type.get(type)
+        if (!ts) return []
         
-        // Delete by ID(s)
-        const ids = Array.isArray(target) ? target : [target]
-        for (const id of ids) {
-            const item = items.get(id)
-            if (item && deleteOne(id, options)) {
-                deleted.push(item)
+        const grid = config.grid, maxSq = maxDist * maxDist
+        const minX = Math.floor((x - maxDist) / grid), maxX = Math.floor((x + maxDist) / grid)
+        const minY = Math.floor((y - maxDist) / grid), maxY = Math.floor((y + maxDist) / grid)
+        
+        const cand = new Set()
+        for (let cx = minX; cx <= maxX; cx++) 
+            for (let cy = minY; cy <= maxY; cy++) 
+                indexes.spatial.get(`${cx},${cy}`)?.forEach(id => ts.has(id) && cand.add(id))
+        
+        if (!cand.size) return []
+        
+        const wd = []
+        for (const id of cand) {
+            const p = indexes.coords.get(id)
+            if (!p) continue
+            const dx = p.x - x, dy = p.y - y, ds = dx*dx + dy*dy
+            if (ds <= maxSq) {
+                const it = items.get(id)
+                if (it && (!Object.keys(filter).length || m(it, filter)))
+                    wd.push({ it, ds })
             }
         }
         
-        return deleted
+        return wd.sort((a,b)=>a.ds-b.ds).map(w=>w.it)
     }
-    
-    function find(type, criteria = {}, options = {}) {
-        let results = Array.from(items.values())
-            .filter(item => item.type === type)
-        
-        // Apply criteria
-        if (Object.keys(criteria).length > 0) {
-            results = results.filter(item => matchesCriteria(item, criteria))
+
+    const w = (id, ch, o={}) => {
+        const old = items.get(id), now = Date.now()
+        const it = old ? {...old, ...ch, modified:now} : {id, created:now, modified:now, ...ch}
+        if (config.types.size && o.validate!==false && !config.types.has(it.type))
+            throw new Error(`Invalid type: ${it.type}`)
+        items.set(id, it)
+        ui(old ? 'update' : 'add', it, old)
+        if (!o.silent) {
+            e(old?'update':'create', { id, item:it, old })
+            e('change', { type: old?'update':'create', id, item:it })
         }
-        
-        // Spatial search
-        if (criteria.near) {
-            results = spatialSearch(results, criteria)
-        }
-        
-        // Sorting
-        if (options.sort) {
-            results = sortResults(results, options.sort)
-        }
-        
-        // Pagination
-        if (options.limit) {
-            const offset = options.offset || 0
-            results = results.slice(offset, offset + options.limit)
-        }
-        
-        // Return formats
-        if (options.count) return results.length
-        if (options.ids) return results.map(r => r.id)
-        if (options.first) return results[0]
-        if (options.last) return results[results.length - 1]
-        
-        return results
+        meta.get('tx')?.at(-1)?.push({ type: old?'update':'create', id, old, new:it })
+        return it
     }
-    
-    // ==================== TRANSACTIONS ====================
-    
-    function beginTransaction() {
-        const tx = {
-            id: Date.now(),
-            operations: [],
-            commit: () => {
-                transactionStack = transactionStack.filter(t => t.id !== tx.id)
-                emit('transaction', { type: 'commit', id: tx.id })
-            },
-            rollback: () => {
-                for (let i = tx.operations.length - 1; i >= 0; i--) {
-                    const op = tx.operations[i]
-                    if (op.type === 'create') items.delete(op.id)
-                    else if (op.type === 'update') items.set(op.id, op.old)
-                    else if (op.type === 'delete') items.set(op.id, op.item)
-                }
-                transactionStack = transactionStack.filter(t => t.id !== tx.id)
-                emit('transaction', { type: 'rollback', id: tx.id })
+
+    const q = (type, filter = {}, opts = {}) => {
+        const ts = indexes.type.get(type)
+        if (!ts) return opts.count ? 0 : (opts.first ? null : [])
+        
+        const hn = filter?.$near
+        const ho = filter && Object.values(filter).some(v => v?.constructor === Object)
+        
+        let r = []
+        if (hn) {
+            const [x, y, max = Infinity] = filter.$near, f = {...filter}
+            delete f.$near
+            r = sq(type, x, y, max, f)
+        } else if (!filter || !Object.keys(filter).length) {
+            r = Array(ts.size); let i = 0; for (const id of ts) r[i++] = items.get(id)
+        } else if (!ho) {
+            r = []; for (const id of ts) {
+                const it = items.get(id); if (!it) continue
+                let ok = 1; for (const k in filter) if (it[k] !== filter[k]) { ok = 0; break }
+                ok && r.push(it)
             }
+        } else {
+            r = []; for (const id of ts) { const it = items.get(id); it && m(it, filter) && r.push(it) }
         }
         
-        transactionStack.push(tx)
-        return tx
-    }
-    
-    // ==================== EVENTS ====================
-    
-    function on(event, callback) {
-        if (!listeners.has(event)) {
-            listeners.set(event, new Set())
-        }
-        listeners.get(event).add(callback)
-        return () => off(event, callback)
-    }
-    
-    function off(event, callback) {
-        listeners.get(event)?.delete(callback)
-    }
-    
-    function emit(event, data) {
-        listeners.get(event)?.forEach(cb => {
-            try { cb(data) } catch (e) { console.error(e) }
-        })
-    }
-    
-    // ==================== INTERNALS ====================
-    
-    function matchesCriteria(item, criteria) {
-        for (const [key, condition] of Object.entries(criteria)) {
-            if (key === 'near' || key === 'maxDistance') continue
-            
-            const value = item[key]
-            
-            // Operator object
-            if (condition && typeof condition === 'object') {
-                if (condition.gt !== undefined && !(value > condition.gt)) return false
-                if (condition.lt !== undefined && !(value < condition.lt)) return false
-                if (condition.gte !== undefined && !(value >= condition.gte)) return false
-                if (condition.lte !== undefined && !(value <= condition.lte)) return false
-                if (condition.contains && !String(value).includes(condition.contains)) return false
-                if (condition.in && !condition.in.includes(value)) return false
-            }
-            // Direct equality
-            else if (value !== condition) {
-                return false
-            }
-        }
-        return true
-    }
-    
-    function spatialSearch(items, { near, maxDistance = Infinity }) {
-        const [targetX, targetY] = near
-        
-        return items
-            .filter(item => {
-                const dx = (item.x || 0) - targetX
-                const dy = (item.y || 0) - targetY
-                return Math.sqrt(dx*dx + dy*dy) <= maxDistance
-            })
-            .sort((a, b) => {
-                const da = Math.hypot((a.x || 0) - targetX, (a.y || 0) - targetY)
-                const db = Math.hypot((b.x || 0) - targetX, (b.y || 0) - targetY)
-                return da - db
-            })
-    }
-    
-    function sortResults(items, sort) {
-        if (typeof sort === 'string') {
-            return items.sort((a, b) => (a[sort] || 0) - (b[sort] || 0))
-        }
-        if (Array.isArray(sort)) {
-            return items.sort((a, b) => {
-                for (const field of sort) {
-                    const diff = (a[field] || 0) - (b[field] || 0)
-                    if (diff !== 0) return diff
-                }
+        if (opts.sort) {
+            const f = Array.isArray(opts.sort) ? opts.sort : [opts.sort]
+            r.length > 1 && r.sort((a,b) => {
+                for (const F of f) { const av = a[F]||0, bv = b[F]||0; if (av !== bv) return av < bv ? -1 : 1 }
                 return 0
             })
         }
-        return items
+        
+        if (opts.limit) { const off = opts.offset||0; r = r.slice(off, off + opts.limit) }
+        
+        return opts.count ? r.length : opts.ids ? r.map(x=>x.id) : opts.first ? r[0]||null : opts.last ? r.at(-1)||null : r
     }
-    
-    function deleteOne(id, options) {
-        const item = items.get(id)
-        if (!item) return false
-        
-        items.delete(id)
-        updateIndexes('remove', item)
-        
-        if (!options.silent) {
-            emit('delete', item)
-            emit('change', { type: 'delete', item })
-        }
-        
-        recordTransaction('delete', { id, item: { ...item } })
-        
-        return true
+
+    const rd = (id, o={}) => {
+        let it = items.get(id)
+        return !it ? o.exists ? false : null : o.exists ? true : 
+            o.fields ? Object.fromEntries(o.fields.map(f=>[f, it[f]])) : 
+            o.clone === false ? it : {...it}
     }
-    
-    function recordTransaction(type, data) {
-        const tx = transactionStack[transactionStack.length - 1]
-        if (tx) {
-            tx.operations.push({ type, ...data })
-        }
+
+    const rm = (id, o={}) => {
+        let it = items.get(id)
+        if (!it) return 0
+        items.delete(id); ui('remove', it)
+        if (!o.silent) { e('delete', it); e('change', { type:'delete', id, item:it }) }
+        meta.get('tx')?.at(-1)?.push({ type:'delete', id, item:it })
+        return 1
     }
-    
-    function updateIndexes(action, item, oldItem) {
-        // Spatial index (100x100 grid cells)
-        if (!indexes.has('spatial')) {
-            indexes.set('spatial', new Map())
-        }
-        const spatial = indexes.get('spatial')
-        
-        if (action === 'add' || action === 'update') {
-            const key = `${Math.floor(item.x / 100)},${Math.floor(item.y / 100)}`
-            if (!spatial.has(key)) spatial.set(key, new Set())
-            spatial.get(key).add(item.id)
-        }
-        
-        if (action === 'remove' || action === 'update') {
-            const oldKey = `${Math.floor(oldItem?.x / 100)},${Math.floor(oldItem?.y / 100)}`
-            spatial.get(oldKey)?.delete(item.id)
-        }
-        
-        // Type index
-        if (!indexes.has('type')) {
-            indexes.set('type', new Map())
-        }
-        const typeIndex = indexes.get('type')
-        if (!typeIndex.has(item.type)) {
-            typeIndex.set(item.type, new Set())
-        }
-        
-        if (action === 'add') {
-            typeIndex.get(item.type).add(item.id)
-        } else if (action === 'remove') {
-            typeIndex.get(item.type)?.delete(item.id)
-        } else if (action === 'update' && oldItem?.type !== item.type) {
-            typeIndex.get(oldItem.type)?.delete(item.id)
-            typeIndex.get(item.type).add(item.id)
+
+    const tx = (fn) => {
+        const t = meta.get('tx')||[]; meta.set('tx', [...t, []])
+        try { const r = fn(); meta.set('tx', t); return r }
+        catch(e) {
+            for (const op of meta.get('tx').pop().reverse()) 
+                op.type == 'create' ? items.delete(op.id) :
+                op.type == 'update' ? items.set(op.id, op.old) :
+                op.type == 'delete' && items.set(op.id, op.item)
+            meta.set('tx', t); throw e
         }
     }
-    
-    function clear() {
-        items.clear()
-        indexes.clear()
-        emit('clear')
-    }
-    
-    // ==================== RETURN ====================
-    
+
     return {
-        create,
-        get,
-        set,
-        remove,
-        find,
-        beginTransaction,
-        on,
-        off,
-        clear,
-        _debug: { items, indexes }
+        create: (t, p={}) => w(p.id||config.idGen(), {type:t, ...config.defaults[t], ...p}),
+        set: (id, p) => items.has(id) ? w(id, typeof p == 'string' ? {[p]: arguments[2]} : p) : null,
+        update: (id, c) => items.has(id) ? w(id, c) : null,
+        increment: (id, f, b=1) => { let it = items.get(id); return it ? w(id, {[f]: (it[f]||0) + b}) : null },
+        get: rd, exists: id => items.has(id),
+        find: q, count: (t,f) => q(t,f,{count:1}), first: (t,f) => q(t,f,{first:1}),
+        delete: rm, deleteMany: ids => ids.map(rm),
+        clear: () => { let c = items.size; items.clear(); indexes.type.clear(); indexes.spatial.clear(); indexes.coords.clear(); return c },
+        transaction: tx,
+        on: (e, cb) => { if (!listeners.has(e)) listeners.set(e, new Set()); listeners.get(e).add(cb); return () => listeners.get(e)?.delete(cb) },
+        once: (e, cb) => { let w = (d) => { cb(d); listeners.get(e)?.delete(w) }; listeners.get(e)?.add(w); return () => listeners.get(e)?.delete(w) },
+        off: (e, cb) => listeners.get(e)?.delete(cb),
+        dump: () => new Map([...items].map(([k,v])=>[k,{...v}])),
+        stats: () => ({
+            items: items.size,
+            types: Object.fromEntries([...indexes.type].map(([t,s])=>[t,s.size])),
+            spatial: { cells: indexes.spatial.size, coords: indexes.coords.size },
+            listeners: Object.fromEntries([...listeners].map(([e,s])=>[e,s.size]))
+        }),
+        meta: { get: k=>meta.get(k), set: (k,v)=>meta.set(k,v), config: ()=>({...config}) }
     }
 }
