@@ -1,4 +1,4 @@
-// tinyset.js v2.4
+// tinyset.js v2.5
 export const where={
 eq:(k,v)=>i=>i[k]===v,ne:(k,v)=>i=>i[k]!==v,gt:(k,v)=>i=>i[k]>v,gte:(k,v)=>i=>i[k]>=v,
 lt:(k,v)=>i=>i[k]<v,lte:(k,v)=>i=>i[k]<=v,in:(k,a)=>i=>a.includes(i[k]),
@@ -83,7 +83,11 @@ return Q(r)
 
 const near=(t,x,y,d,p)=>Q(spatial(t,x,y,d,p))
 
-const get=id=>{const it=items.get(id);return it?{...it}:null}
+const get=(id,op={})=>{
+const it=items.get(id)
+if(!it)return null
+return op.mutable?it:{...it}
+}
 const ref=id=>items.get(id)||null
 const pick=(id,f)=>{const it=items.get(id);if(!it)return null;const o={};for(const k of f)o[k]=it[k];return o}
 
@@ -95,14 +99,24 @@ meta.get('tx')?.at(-1)?.push({type:'delete',id,item:it})
 return 1
 }
 
-const tx=fn=>{
+const tx=(fn,op={})=>{
 const t=meta.get('tx')||[];meta.set('tx',[...t,[]])
-try{const r=fn();meta.set('tx',t);return r}
+const suspended=op.silent?listeners.get('change'):null
+if(suspended)listeners.set('change',new Set())
+try{const r=fn();meta.set('tx',t)
+if(suspended){emit('batch',{count:meta.get('tx')?.at(-1)?.length});emit('change',{type:'batch'});listeners.set('change',suspended)}
+return r}
 catch(e){
 for(const op of meta.get('tx').pop().reverse())
 op.type=='create'?items.delete(op.id):op.type=='update'?items.set(op.id,op.old):items.set(op.id,op.item)
-meta.set('tx',t);throw e}
+meta.set('tx',t);if(suspended)listeners.set('change',suspended);throw e}
 }
+
+const batch=ops=>tx(()=>ops.map(op=>{
+if(op.type==='create')return w(op.data?.id||cfg.id(),{type:op.type,...cfg.defs[op.type],...op.data},{silent:true})
+if(op.type==='update'&&items.has(op.id))return w(op.id,op.changes,{silent:true})
+if(op.type==='delete'&&items.has(op.id))return rm(op.id,{silent:true})
+}),{silent:true})
 
 return{
 create:(t,p={})=>w(p.id||cfg.id(),{type:t,...cfg.defs[t],...p}),
@@ -114,7 +128,7 @@ get,getRef:ref,pick,exists:id=>items.has(id),
 
 find,near,
 
-delete:rm,deleteMany:ids=>ids.map(rm),
+delete:rm,deleteMany:ids=>ids.map(id=>rm(id)),
 
 clear:()=>{const c=items.size;items.clear();idx.type.clear();idx.spatial.clear();idx.coords.clear();return c},
 
@@ -133,6 +147,8 @@ spatial:{cells:idx.spatial.size,coords:idx.coords.size},
 listeners:Object.fromEntries([...listeners].map(([e,s])=>[e,s.size]))
 }),
 
-meta:{get:k=>meta.get(k),set:(k,v)=>meta.set(k,v),config:()=>({...cfg})}
+meta:{get:k=>meta.get(k),set:(k,v)=>meta.set(k,v),config:()=>({...cfg})},
+
+...(o.enableBatch?{batch,createMany:(type,items)=>batch(items.map(data=>({type:'create',type,data})))}:{})
 }
 }
