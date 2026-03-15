@@ -273,7 +273,7 @@ store.clear()  // removes everything, returns count
 `tinyset+` wraps the base store with distribution primitives: vector clocks, an operation journal, WebSocket sync, and merge strategies. Same API, same spatial index, same query engine — with an opt-in layer for real-time and collaborative applications.
 
 ```js
-import { createStore } from './tinyset-plus.js'
+import { createStore } from './tinyset.plus.js'
 
 const store = createStore({ processId: 'client-1', syncUrl: 'wss://your-server' })
 
