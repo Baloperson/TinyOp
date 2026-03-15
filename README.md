@@ -331,13 +331,13 @@ store.merge(otherStore, 'timestamp')          // last-write-wins by modified tim
 
 | Operation | Speed |
 |---|---|
-| Journal writes | 132K ops/sec |
-| Clock snapshots | 3.7M ops/sec |
-| Clock merges | 7M ops/sec |
-| Export (1K ops) | 311K ops/sec |
-| Affine batch apply (10K items) | 158M items/sec |
+| Journal writes | 125K ops/sec |
+| Clock snapshots | 3.3M ops/sec |
+| Clock merges | 11M ops/sec |
+| Export (1K ops) | 215K ops/sec |
+| Affine batch apply (10K items) | 144M items/sec |
 
-Memory overhead for distribution: **+74%** per item (~667 bytes → ~879 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyset+`.
+Memory overhead for distribution: **+81%** per item (~473 bytes → ~856 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyset+`.
 
 ---
 
