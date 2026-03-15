@@ -10,15 +10,6 @@ Plus:    +4kB  | +25 lines
 Total:   ~9kB 
 ```
 
-## Installation
-
-```bash
-npm install tinyset
-# or
-yarn add tinyset
-```
-# tinyset.js
-
 **The in-memory store for entity-component and spatial systems.**  
 Type-indexed entities, grid-based spatial queries, compound filtering, and events — in a single file, with zero dependencies.
 
