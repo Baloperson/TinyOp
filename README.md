@@ -299,6 +299,14 @@ store.dump()   // plain object of all items (shallow copies)
 store.clear()  // removes everything, returns count
 ```
 
+
+## Tests
+```bash
+node --test test.js
+```
+
+78 tests covering the core API, query cache correctness, and spatial index.
+
 ---
 
 ## tinyset+
