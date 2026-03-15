@@ -1,9 +1,9 @@
-// tinyset.js v2.5
+// tinyset.js v2.6
 export const where={
 eq:(k,v)=>i=>i[k]===v,ne:(k,v)=>i=>i[k]!==v,gt:(k,v)=>i=>i[k]>v,gte:(k,v)=>i=>i[k]>=v,
 lt:(k,v)=>i=>i[k]<v,lte:(k,v)=>i=>i[k]<=v,in:(k,a)=>i=>a.includes(i[k]),
-contains:(k,v)=>String(i[k]).includes(v),startsWith:(k,v)=>String(i[k]).startsWith(v),
-endsWith:(k,v)=>String(i[k]).endsWith(v),exists:k=>i=>i[k]!==undefined,
+contains:(k,v)=>i=>String(i[k]).includes(v),startsWith:(k,v)=>i=>String(i[k]).startsWith(v),
+endsWith:(k,v)=>i=>String(i[k]).endsWith(v),exists:k=>i=>i[k]!==undefined,
 and:(...f)=>i=>f.every(fn=>fn(i)),or:(...f)=>i=>f.some(fn=>fn(i))
 }
 
@@ -40,7 +40,8 @@ if(ok!==k){idx.spatial.get(ok)?.delete(it.id);if(!idx.spatial.has(k))idx.spatial
 
 const w=(id,ch,o={})=>{
 const old=items.get(id),now=Date.now()
-const it=old?{...old,...ch,modified:now}:{id,created:now,modified:now,...ch}
+const changes=typeof ch==='function'?ch(old):ch
+const it=old?{...old,...changes,modified:now}:{id,created:now,modified:now,...changes}
 if(cfg.types.size&&!cfg.types.has(it.type))throw Error(`Invalid type: ${it.type}`)
 items.set(id,it);ui(old?'update':'add',it,old)
 if(!o.silent){emit(old?'update':'create',{id,item:it,old});emit('change',{type:old?'update':'create',id,item:it})}
@@ -83,50 +84,39 @@ return Q(r)
 
 const near=(t,x,y,d,p)=>Q(spatial(t,x,y,d,p))
 
-const get=(id,op={})=>{
-const it=items.get(id)
-if(!it)return null
-return op.mutable?it:{...it}
-}
+const get=id=>{const it=items.get(id);return it?{...it}:null}
 const ref=id=>items.get(id)||null
 const pick=(id,f)=>{const it=items.get(id);if(!it)return null;const o={};for(const k of f)o[k]=it[k];return o}
 
-const rm=(id,o={})=>{
-const it=items.get(id);if(!it)return 0
+const rm=(id)=>{
+const it=items.get(id);if(!it)return null
 items.delete(id);ui('remove',it)
-if(!o.silent){emit('delete',it);emit('change',{type:'delete',id,item:it})}
+emit('delete',{id,item:it});emit('change',{type:'delete',id,item:it})
 meta.get('tx')?.at(-1)?.push({type:'delete',id,item:it})
-return 1
+return it
 }
 
-const tx=(fn,op={})=>{
+const tx=fn=>{
 const t=meta.get('tx')||[];meta.set('tx',[...t,[]])
-const suspended=op.silent?listeners.get('change'):null
-if(suspended)listeners.set('change',new Set())
-try{const r=fn();meta.set('tx',t)
-if(suspended){emit('batch',{count:meta.get('tx')?.at(-1)?.length});emit('change',{type:'batch'});listeners.set('change',suspended)}
-return r}
+try{const r=fn();meta.set('tx',t);return r}
 catch(e){
 for(const op of meta.get('tx').pop().reverse())
 op.type=='create'?items.delete(op.id):op.type=='update'?items.set(op.id,op.old):items.set(op.id,op.item)
-meta.set('tx',t);if(suspended)listeners.set('change',suspended);throw e}
+meta.set('tx',t);throw e}
 }
 
-const batch=ops=>tx(()=>ops.map(op=>{
-if(op.type==='create')return w(op.data?.id||cfg.id(),{type:op.type,...cfg.defs[op.type],...op.data},{silent:true})
-if(op.type==='update'&&items.has(op.id))return w(op.id,op.changes,{silent:true})
-if(op.type==='delete'&&items.has(op.id))return rm(op.id,{silent:true})
-}),{silent:true})
+const createOne=(t,p={})=>w(p.id||cfg.id(),{type:t,...cfg.defs[t],...p})
 
 return{
-create:(t,p={})=>w(p.id||cfg.id(),{type:t,...cfg.defs[t],...p}),
+create:createOne,
+createMany:(t,arr)=>arr.map(p=>createOne(t,p)),
 update:(id,c)=>items.has(id)?w(id,c):null,
 set:(id,f,v)=>items.has(id)?w(id,{[f]:v}):null,
 increment:(id,f,b=1)=>{const it=items.get(id);return it?w(id,{[f]:(it[f]||0)+b}):null},
 
 get,getRef:ref,pick,exists:id=>items.has(id),
 
-find,near,
+find,near,count:(t,p)=>find(t,p).count(),
 
 delete:rm,deleteMany:ids=>ids.map(id=>rm(id)),
 
@@ -138,7 +128,7 @@ on:(e,cb)=>{if(!listeners.has(e))listeners.set(e,new Set());listeners.get(e).add
 once:(e,cb)=>{let w=d=>{cb(d);listeners.get(e)?.delete(w)};listeners.get(e)?.add(w);return()=>listeners.get(e)?.delete(w)},
 off:(e,cb)=>listeners.get(e)?.delete(cb),
 
-dump:()=>new Map([...items].map(([k,v])=>[k,{...v}])),
+dump:()=>Object.fromEntries([...items].map(([k,v])=>[k,{...v}])),
 
 stats:()=>({
 items:items.size,
@@ -147,8 +137,6 @@ spatial:{cells:idx.spatial.size,coords:idx.coords.size},
 listeners:Object.fromEntries([...listeners].map(([e,s])=>[e,s.size]))
 }),
 
-meta:{get:k=>meta.get(k),set:(k,v)=>meta.set(k,v),config:()=>({...cfg})},
-
-...(o.enableBatch?{batch,createMany:(type,items)=>batch(items.map(data=>({type:'create',type,data})))}:{})
+meta:{get:k=>meta.get(k),set:(k,v)=>meta.set(k,v),config:()=>({...cfg})}
 }
 }
