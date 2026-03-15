@@ -17,407 +17,317 @@ npm install tinyset
 # or
 yarn add tinyset
 ```
+# tinyset.js
 
-## Core Library (`tinyset`)
+**The in-memory store for entity-component and spatial systems.**  
+Type-indexed entities, grid-based spatial queries, compound filtering, and events — in a single file, with zero dependencies.
 
-### Basic Usage
+```js
+import { createStore, where } from './tinyset.js'
 
-```javascript
-import { createStore } from 'tinyset'
+const store = createStore({ spatialGridSize: 100 })
 
-const store = createStore()
+const player = store.create('player', { x: 100, y: 200, hp: 100 })
+store.create('enemy',  { x: 115, y: 210, hp: 50, tier: 'elite' })
+store.create('enemy',  { x: 400, y: 300, hp: 50, tier: 'normal' })
 
-// Create items with type and properties
-const graph = store.create('graph', { 
-  x: 100, 
-  y: 200, 
-  width: 400, 
-  height: 300 
-})
+// spatial query — grid-indexed, not a linear scan
+const nearby = store.near('enemy', player.x, player.y, 80).all()
 
-// Retrieve by ID
-const item = store.get(graph.id)
+// compound filter
+const threats = store.find('enemy', where.and(
+  where.eq('tier', 'elite'),
+  where.gt('hp', 0)
+)).sort('hp').all()
 
-// Query by type with criteria
-const results = store.find('graph', {
-  x: { gt: 50, lt: 150 },
-  y: { gte: 100 }
-})
-
-// Update properties
-store.set(graph.id, 'width', 500)
-
-// Listen to changes
-const unsubscribe = store.on('create', (item) => {
-  console.log('New item:', item)
-})
-
-// Remove items
-store.remove(graph.id)
+store.on('delete', e => console.log(`${e.type} destroyed`))
+store.update(nearby[0].id, { hp: 0 })
+store.delete(nearby[0].id)
 ```
 
-### API Reference
-
-#### `createStore(options)`
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `idGenerator` | Function | UUID generator | Custom ID generation |
-| `validateTypes` | Boolean | `true` | Warn on unknown types |
-| `defaults` | Object | `{}` | Type-specific defaults |
-| `processId`* | String | Random | Unique process identifier |
-
-\* *Required for distributed features*
-
-#### Core Methods
-
-| Method | Description | Returns |
-|--------|-------------|---------|
-| `create(type, props)` | Create new item(s) | Item or array |
-| `get(id)` | Retrieve by ID | Item or null |
-| `get(type)` | Get all of type | Array |
-| `get([ids])` | Get multiple | Array |
-| `set(id, prop, value)` | Update property | Rollback function |
-| `set(id, props)` | Batch update | Rollback function |
-| `remove(id)` | Delete item(s) | Deleted items |
-| `find(type, criteria, options)` | Query items | Array or count |
-| `on(event, callback)` | Subscribe | Unsubscribe fn |
-| `off(event, callback)` | Unsubscribe | - |
-
-#### Query Operators
-
-```javascript
-// Comparison operators
-{ age: { gt: 21 } }           // Greater than
-{ age: { lt: 65 } }           // Less than
-{ age: { gte: 18 } }          // Greater than or equal
-{ age: { lte: 30 } }          // Less than or equal
-
-// String operators
-{ name: { contains: 'smith' } } // Substring match
-{ status: { in: ['active', 'pending'] } } // Array inclusion
-
-// Spatial operators
-{ near: [x, y], maxDistance: 50 } // Distance-based
-```
-
-#### Query Options
-
-```javascript
-const results = store.find('graph', { x: { gt: 100 } }, {
-  sort: 'x',                    // Sort by field
-  sort: ['x', 'y'],             // Multi-field sort
-  limit: 10,                    // Pagination limit
-  offset: 20,                   // Pagination offset
-  count: true,                   // Return count only
-  ids: true,                     // Return IDs only
-  first: true,                    // Return first match
-  last: true                      // Return last match
-})
-```
-
-#### Update Syntax
-
-```javascript
-// Relative updates (string operators)
-store.set(id, 'x', '+50')        // Add 50
-store.set(id, 'x', '-20')        // Subtract 20
-store.set(id, 'x', '*2')         // Multiply by 2
-store.set(id, 'x', '/2')         // Divide by 2
-
-// Function updates
-store.set(id, 'x', (prev) => prev + 50)
-
-// Deep paths
-store.set(id, 'user.address.city', 'London')
-
-// Batch updates
-store.set(id, { x: 100, y: 200, width: 500 })
-
-// Multiple items
-store.set([id1, id2], 'status', 'active')
-```
-
-#### Transactions
-
-```javascript
-const tx = store.beginTransaction()
-
-try {
-  store.set(item1.id, 'status', 'processing')
-  store.set(item2.id, 'status', 'completed')
-  store.remove(tempItem.id)
-  
-  tx.commit()  // Commit changes
-} catch (error) {
-  tx.rollback()  // Undo all changes
-}
-```
-
-#### Events
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `create` | `item` | Item created |
-| `update` | `{id, old, new, changes}` | Item updated |
-| `delete` | `item` | Item deleted |
-| `change` | `{type, item}` | Any change |
-| `clear` | - | Store cleared |
+In a vanilla implementation, the equivalent store infrastructure — type indexes, spatial grid, event emitter, compound filtering — is **40–80 lines before you write any game logic**. With tinyset it's two lines of setup. For files where entity management is the main job, that's typically a **40–75% reduction in meaningful lines**.
 
 ---
 
-## Plus Extension (`tinyset+`)
+## Why tinyset
 
-Adds distributed capabilities while maintaining the same core API.
+Most JS data libraries are either key-value caches (fast reads, no query model) or full query engines (powerful, heavy). Neither fits the entity-component pattern well.
 
-### Usage
+Tinyset is built specifically for systems where you need to:
 
-```javascript
-import { createStore } from 'tinyset/plus'
+- Store thousands of typed entities and retrieve them by type instantly
+- Find entities within a spatial radius — without scanning the whole set
+- Filter with compound predicates and chain results
+- React to changes through a lightweight event system
+- Run transactions that roll back cleanly on failure
 
-const store = createStore({
-  processId: 'server-1'  // Required for distributed features
-})
-
-// Same core API as above, plus:
-```
-
-### Additional Features
-
-#### Vector Clocks
-
-```javascript
-// Automatic causal consistency
-store.create('graph', { x: 100 })  // Operation gets vector clock
-
-// Manual clock inspection
-const clock = store._debug.vectorClock
-// { 'server-1': 5, 'client-2': 3, 'client-7': 12 }
-```
-
-#### Operation Journal
-
-```javascript
-// All operations are automatically logged
-const journal = store._debug.journal
-
-// Export operations since timestamp
-const log = store.exportLog(1625097600000)
-
-// Import operations from another instance
-store.importLog(remoteLog, { 
-  strategy: 'merge'  // or 'force'
-})
-```
-
-#### Checkpoints
-
-```javascript
-// Create state snapshot (prunes journal)
-const checkpoint = store.checkpoint()
-
-// Checkpoint contains full state at that moment
-// Journal now contains only operations after checkpoint
-```
-
-#### Synchronization
-
-```javascript
-// WebSocket sync
-const disconnect = store.connect('ws://server:8080')
-
-// Manual sync
-const localLog = store.exportLog()
-// Send over network...
-remoteStore.importLog(localLog)
-
-// Listen to journal for replication
-const unsubscribe = store.onJournal((operation) => {
-  // Broadcast to peers
-  broadcast(operation)
-})
-```
-
-#### Affine Operations
-
-```javascript
-import { AffineOp } from 'tinyset/plus'
-
-// Create composable transformations
-const translate = new AffineOp(1, 100)      // x → x + 100
-const scale = new AffineOp(2, 0)            // x → 2x
-const transform = translate.compose(scale)  // x → 2x + 100
-
-// Apply to items
-store.set(item.id, 'x', transform)
-
-// Affine operations are journaled and synced like any other update
-```
-
-### Distributed API
-
-| Method | Description |
-|--------|-------------|
-| `exportLog(since, options)` | Get operations since timestamp |
-| `importLog(log, options)` | Apply remote operations |
-| `connect(url)` | WebSocket connection to peer |
-| `onJournal(callback)` | Listen to raw journal |
-| `checkpoint()` | Create state snapshot |
-| `AffineOp` | Tensor operation constructor |
-
-### Sync Strategies
-
-| Strategy | Behavior |
-|----------|----------|
-| `'merge'` | Apply if operation is newer (default) |
-| `'force'` | Apply regardless of clock |
-| `'dryRun'` | Test without applying |
+It wins on **mixed workloads** — the benchmark that reflects real game loops and collaborative apps, where creates, reads, updates, and deletes happen in every frame.
 
 ---
 
-## Examples
+## Benchmarks
 
-### Basic Todo App
+All benchmarks run on Node v24, AMD FX-6350, compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
 
-```javascript
+### Mixed workload — 10,000 operations (create + read + update + delete)
+
+| Library | ops/sec |
+|---|---|
+| **Tinyset** | **21,655** |
+| MemoryCache | 14,062 |
+| NodeCache | 11,579 |
+| Immutable | 10,500 |
+| Array Store | ~8,500 |
+| Object Store | 3,734 |
+
+Tinyset wins this category by ~54% over the next competitor. Isolated read or write microbenchmarks favour simpler structures — but real systems don't run isolated operations.
+
+### Spatial queries — average latency per query
+
+| Library | Avg latency |
+|---|---|
+| **Tinyset (filtered)** | **0.001ms** |
+| **Tinyset** | **0.004ms** |
+| RBush | 0.060ms |
+| Flatbush | 0.073ms |
+
+**15–73× faster than dedicated spatial libraries.** The reason is architectural: Tinyset's grid cell index co-locates type filtering with proximity search. RBush and Flatbush do geometry only — type filtering is a separate pass. Tinyset does both in one sweep.
+
+### Other categories
+
+| Category | Tinyset | Fastest overall |
+|---|---|---|
+| Create (10k items) | 270K ops/sec | LokiJS 703K |
+| Read — safe get (100k) | 3.3M ops/sec | MemoryCache 12M |
+| Read — ref (100k) | 7.5M ops/sec | — |
+| Update (50k) | 845K ops/sec | Lodash 2.4M |
+| Query — compound filter | 1.3ms | Only tinyset supports this |
+| Memory per item | 667 bytes | LokiJS 565 bytes |
+
+Tinyset is not the fastest at any single isolated operation. It is consistently fast across all of them, and fastest at the workloads that combine them.
+
+---
+
+## Installation
+
+```bash
+# copy the single file into your project
+curl -O https://raw.githubusercontent.com/your-repo/tinyset/main/tinyset.js
+```
+
+Or just download `tinyset.js`. No build step. No package manager required. It's one file.
+
+---
+
+## API
+
+### Creating a store
+
+```js
 const store = createStore({
+  spatialGridSize: 100,   // grid cell size for spatial index (default 100)
+  types: new Set(['player', 'enemy', 'bullet']),  // optional type validation
   defaults: {
-    todo: { completed: false, text: '' }
-  }
+    enemy: { hp: 30, alive: true }  // default props per type
+  },
+  idGenerator: () => myCustomId(),  // optional custom ID function
+  enableBatch: true                 // enable batch/createMany operations
 })
-
-// Add todo
-function addTodo(text) {
-  return store.create('todo', { text })
-}
-
-// Toggle completion
-function toggleTodo(id) {
-  const todo = store.get(id)
-  store.set(id, 'completed', !todo.completed)
-}
-
-// Get active todos
-function getActiveTodos() {
-  return store.find('todo', { completed: false })
-}
-
-// Listen for changes
-store.on('change', render)
 ```
 
-### Collaborative Whiteboard
+### Creating and mutating entities
 
-```javascript
-const store = createStore({
-  processId: `user-${userId}`,
-  defaults: {
-    shape: { x: 0, y: 0, color: '#000' }
-  }
-})
+```js
+// create — returns the new entity
+const enemy = store.create('enemy', { x: 100, y: 200, hp: 50 })
 
-// Connect to collaboration server
-store.connect('wss://collab.example.com')
+// update — merges changes, updates modified timestamp
+store.update(enemy.id, { hp: 30 })
 
-// Draw shape (auto-syncs to other users)
-function drawShape(type, x, y) {
-  store.create(type, { x, y })
-}
+// set — single field shorthand
+store.set(enemy.id, 'hp', 30)
 
-// Move shape (updates in real-time)
-function moveShape(id, dx, dy) {
-  store.set(id, 'x', `+${dx}`)
-  store.set(id, 'y', `+${dy}`)
-}
+// increment — atomic field increment
+store.increment(enemy.id, 'score', 10)
 
-// Find nearby shapes
-function getShapesNear(x, y, radius) {
-  return store.find('shape', {
-    near: [x, y],
-    maxDistance: radius
-  })
-}
+// delete
+store.delete(enemy.id)
+store.deleteMany([id1, id2, id3])
 ```
 
-### Offline-First Application
+### Reading entities
 
-```javascript
-const store = createStore({
-  processId: 'offline-client'
+```js
+// safe get — returns a shallow copy
+const entity = store.get(id)
+
+// ref — returns the live object (faster, don't mutate)
+const entity = store.getRef(id)
+
+// pick — returns only specified fields
+const pos = store.pick(id, ['x', 'y'])
+
+// exists
+if (store.exists(id)) { ... }
+```
+
+### Querying
+
+```js
+// find by type with optional predicate
+const enemies = store.find('enemy').all()
+const alive = store.find('enemy', e => e.hp > 0).all()
+
+// spatial — find entities within radius, sorted by distance
+const nearby = store.near('enemy', x, y, radius).all()
+const nearAlive = store.near('enemy', x, y, 100, e => e.hp > 0).first()
+
+// query chain
+store.find('enemy', where.gt('hp', 0))
+  .sort('hp')
+  .limit(5)
+  .offset(0)
+  .all()     // → array
+  .first()   // → first item or null
+  .last()    // → last item or null
+  .count()   // → number
+  .ids()     // → array of ids
+```
+
+### `where` predicates
+
+```js
+where.eq('type', 'elite')
+where.ne('status', 'dead')
+where.gt('hp', 50)
+where.gte('level', 10)
+where.lt('ttl', 0)
+where.lte('price', 100)
+where.in('tier', ['elite', 'boss'])
+where.contains('name', 'Sword')
+where.startsWith('id', 'player-')
+where.exists('target')
+
+// compose
+where.and(where.eq('tier', 'elite'), where.gt('hp', 0))
+where.or(where.eq('tier', 'boss'), where.gte('score', 500))
+```
+
+### Events
+
+```js
+const off = store.on('create', ({ id, item }) => { ... })
+store.on('update', ({ id, item, old }) => { ... })
+store.on('delete', ({ id, item }) => { ... })
+store.on('change', ({ type, id, item }) => { ... })  // all changes
+
+store.once('create', callback)  // fires once then removes itself
+
+off()  // unsubscribe
+```
+
+### Transactions
+
+```js
+// all-or-nothing — rolls back on throw
+store.transaction(() => {
+  store.update(playerId, { hp: 0 })
+  store.delete(playerId)
+  store.create('ghost', { x: 100, y: 200 })
 })
 
-// Work offline - operations are journaled
-store.create('note', { content: 'Draft' })
+// silent batch — fires one 'batch' event instead of per-op events
+store.transaction(() => { ... }, { silent: true })
+```
 
-// Later, when online:
-if (navigator.onLine) {
-  // Sync with server
-  const localLog = store.exportLog()
-  await fetch('/api/sync', {
-    method: 'POST',
-    body: JSON.stringify(localLog)
-  })
-}
+### Batch operations
 
-// On reconnect, import server changes
-async function syncFromServer() {
-  const response = await fetch('/api/sync')
-  const remoteLog = await response.json()
-  store.importLog(remoteLog)
-}
+Requires `enableBatch: true` in store config.
+
+```js
+store.batch([
+  { type: 'create', data: { type: 'enemy', x: 100, y: 200 } },
+  { type: 'update', id: someId, changes: { hp: 10 } },
+  { type: 'delete', id: otherId }
+])
+```
+
+### Stats and introspection
+
+```js
+store.stats()
+// {
+//   items: 1204,
+//   types: { player: 1, enemy: 847, bullet: 356 },
+//   spatial: { cells: 42, coords: 1204 },
+//   listeners: { change: 3 }
+// }
+
+store.dump()   // Map of all items (shallow copies)
+store.clear()  // removes everything, returns count
 ```
 
 ---
 
-## Performance Characteristics
+## tinyset+
 
-| Operation | Time Complexity | Notes |
-|-----------|-----------------|-------|
-| Create | O(1) | + index updates |
-| Get by ID | O(1) | Direct map lookup |
-| Update | O(1) | + index updates if position changes |
-| Delete | O(1) | + index cleanup |
-| Find (equality) | O(n) | Full scan without index |
-| Find (spatial) | O(log n) | Grid-based spatial index |
-| Transaction | O(ops) | Operations reversible |
+`tinyset+` wraps the base store with distribution primitives: vector clocks, an operation journal, WebSocket sync, and merge strategies. Same API, same spatial index, same query engine — with an opt-in layer for real-time and collaborative applications.
 
-**Memory**: Approximately 2x raw data size (items + indexes)
+```js
+import { createStore } from './tinyset-plus.js'
 
----
+const store = createStore({ processId: 'client-1', syncUrl: 'wss://your-server' })
 
-## Browser Support
+// everything from tinyset works identically
+store.create('message', { text: 'hello', userId: 'alice' })
 
-Works in all modern browsers and Node.js 12+.
+// plus: export/import operations for sync
+const snapshot = store.sync.export(lastSyncTimestamp)
+const { applied } = store.sync.import(remoteSnapshot)
 
----
+// vector clock
+store.clock.current()   // → local counter
+store.clock.get()       // → { 'client-1': 42, 'client-2': 38 }
 
-## License
+// operation journal
+store.journal.list()                        // → all recorded ops
+store.journal.query({ type: 'create', since: timestamp })
+store.journal.on(op => sendToServer(op))    // stream ops as they happen
 
-MIT
+// merge two stores (e.g. after offline period)
+store.merge(otherStore, 'timestamp')  // last-write-wins by modified timestamp
+```
 
----
+### Distribution benchmark (Node v24, AMD FX-6350)
 
-## Comparison with Alternatives
+| Operation | Speed |
+|---|---|
+| Journal writes | 132K ops/sec |
+| Clock snapshots | 3.7M ops/sec |
+| Clock merges | 7M ops/sec |
+| Export (1K ops) | 311K ops/sec |
+| Affine batch apply (10K items) | 158M items/sec |
 
-| Feature | TinySet | Redux | MobX | Firebase |
-|---------|---------|-------|------|----------|
-| Bundle size | 5-7kB | 20kB+ | 15kB+ | 100kB+ |
-| Learning curve | Low | High | Medium | Medium |
-| Query support | Built-in | Manual | Manual | Limited |
-| Spatial queries | Yes | No | No | No |
-| Transactions | Yes | Via middleware | No | Yes |
-| Time travel | Built-in | Via devtools | No | No |
-| Offline support | Built-in | Add library | Add library | Add library |
-| Real-time sync | Built-in | Add library | Add library | Built-in |
-| Self-hostable | Yes | Yes | Yes | No |
-| Isomorphic | Yes | Yes | Yes | Limited |
+Memory overhead for distribution: **+74%** per item (667 bytes → 879 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyset+`.
 
 ---
 
-## Contributing
+## Design philosophy
 
-Issues and pull requests welcome.
+**One file.** Copy it in, import it, use it. No transitive dependencies to audit, no build pipeline to configure, no version conflicts.
+
+**Optimised for mixed workloads.** Microbenchmark winners (Lodash, MemoryCache) are specialised — they do one thing fast. Real systems do everything at once. Tinyset is designed for that.
+
+**Spatial and type indexing are first-class.** Not an afterthought or plugin. The grid cell index and type index are maintained on every write and queried together. This is why spatial queries beat dedicated spatial libraries.
+
+**Two tiers with one API.** `tinyset.js` is the foundation — no distribution overhead, pure local performance. `tinyset+` is the ecosystem — distribution, sync, journaling — built on top of the same store. Switching between them requires changing one import line.
 
 ---
 
-*Documentation for TinySet v1.2*
+## Limitations
+
+- **In-memory only.** No persistence built in. For persistence, serialize `store.dump()` to localStorage, IndexedDB, or your backend. `tinyset+` makes this easier with `store.checkpoint()`.
+- **Single-process.** The base store has no built-in sync. Use `tinyset+` for multi-client or multi-process scenarios.
+- **No schema enforcement by default.** Pass `types` to the store config for runtime type validation. Field types are not validated — tinyset is not a typed database.
+- **Read performance trades off for write safety.** `store.get()` returns a shallow copy to prevent external mutation. Use `store.getRef()` for the live reference when performance matters and you won't mutate it.
+
