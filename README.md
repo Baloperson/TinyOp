@@ -259,7 +259,7 @@ store.stats()
 store.dump()   // Map of all items (shallow copies)
 store.clear()  // removes everything, returns count
 ```
-
+just define what exists and ask questions about it the infrastructure is gone.
 ---
 
 ## tinyset+
