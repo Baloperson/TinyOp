@@ -65,22 +65,22 @@ It wins on **mixed workloads** — the benchmark that reflects real game loops a
 
 ## Benchmarks
 
-All benchmarks run on Node v24, AMD FX-6350, median of 15 runs. Compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
+All benchmarks run on Node v24, Intel Xeon Platinum 8370C, median of 15 runs. Compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
 
 ### Mixed workload — 10,000 operations (40% read, 20% update, 20% simple find, 20% compound find)
 
 | Library | ops/sec |
 |---|---|
-| **TinySet** | **52,005** |
-| LokiJS | 50,710 |
-| MemoryCache | 13,810 |
+| **TinySet** | **113,844** |
+| LokiJS | 86,131 |
+| MemoryCache | 26,508 |
 | Lodash | ~14,000 |
 | NodeCache | ~13,000 |
 | Immutable | ~10,000 |
 | Array Store | ~9,500 |
 | Object Store | ~4,300 |
 
-TinySet leads this category. The closest competitor is LokiJS at 50,710 ops/sec — a ~3% margin. LokiJS has a native B-tree field index that gives it an advantage on compound queries specifically; TinySet closes that gap with a hot/cold query cache that promotes frequently-used compound predicates to sub-0.01ms lookup. Every other library trails by 3× or more.
+TinySet leads this category. The closest competitor is LokiJS at 86,131 ops/sec — a ~32% margin. LokiJS has a native B-tree field index that gives it an advantage on compound queries specifically; TinySet closes that gap with a hot/cold query cache that promotes frequently-used compound predicates to sub-0.01ms lookup. Every other library trails by 4× or more.
 
 The mixed workload is the benchmark that matters. Isolated read or write microbenchmarks favour specialised structures — real systems don't run isolated operations.
 
@@ -88,7 +88,7 @@ The mixed workload is the benchmark that matters. Isolated read or write microbe
 
 | Library | ops/sec |
 |---|---|
-| **TinySet** | **820K** |
+| **TinySet** | **1,032K** |
 | LokiJS | 646K |
 | Lodash | ~500K |
 | Array Store | ~420K |
@@ -100,13 +100,13 @@ TinySet now leads creates, beating LokiJS by ~27%. The counter-based id generato
 
 | Library | ops/sec |
 |---|---|
-| **TinySet (ref)** | **39.8M** |
+| **TinySet (ref)** | **112.7M** |
 | Object Store | 15M |
 | MemoryCache | 12.7M |
 | Array Store | 10.9M |
 | TinySet (safe get) | 8.9M |
 
-`store.getRef()` returns the live object directly — 39.8M ops/sec. `store.get()` returns a shallow copy for external safety — 8.9M ops/sec. Use `getRef()` in hot paths where you won't mutate the result.
+`store.getRef()` returns the live object directly — 112.7M ops/sec. `store.get()` returns a shallow copy for external safety — 12.1M ops/sec. Use `getRef()` in hot paths where you won't mutate the result.
 
 ### Query performance — avg latency per query, 10,000 entities
 
@@ -124,7 +124,7 @@ TinySet's hot/cold query cache promotes repeated queries — including compound 
 
 | Category | TinySet | Fastest overall |
 |---|---|---|
-| Update (50k) | 616K ops/sec | Lodash 2.6M |
+| Update (50k) | 1,456K ops/sec | Lodash 6.5M |
 | Memory per item | ~667 bytes | LokiJS 565 bytes |
 
 ### Spatial queries
@@ -327,15 +327,15 @@ store.journal.on(op => sendToServer(op))      // stream ops as they happen
 store.merge(otherStore, 'timestamp')          // last-write-wins by modified timestamp
 ```
 
-### Distribution benchmark (Node v24, AMD FX-6350)
+### Distribution benchmark (Node v24, Intel Xeon Platinum 8370C)
 
 | Operation | Speed |
 |---|---|
-| Journal writes | 125K ops/sec |
-| Clock snapshots | 3.3M ops/sec |
-| Clock merges | 11M ops/sec |
-| Export (1K ops) | 215K ops/sec |
-| Affine batch apply (10K items) | 144M items/sec |
+| Journal writes | 267K ops/sec |
+| Clock snapshots | 6.8M ops/sec |
+| Clock merges | 20.5M ops/sec |
+| Export (1K ops) | 745K ops/sec |
+| Affine batch apply (10K items) | 415M items/sec |
 
 Memory overhead for distribution: **+81%** per item (~473 bytes → ~856 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyset+`.
 
