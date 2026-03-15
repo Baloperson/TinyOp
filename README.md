@@ -1,16 +1,18 @@
+# tinyset.js
 
 A lightweight, isomorphic state container with built-in queries, transactions, and optional real-time synchronization.
 
-
 TinySet provides a unified data layer that works identically in browsers, Node.js, and React Native. The core library handles local state with advanced querying; the optional `+` extension adds distributed features with causal consistency.
-The code written with Tinyset reads like the question you're asking, not like the data structure thats querying
+
+> The code written with Tinyset reads like the question you're asking, not like the data structure that's querying it.
+
 ```
-Core:    ~5kB  | 150 lines
+Core:    ~5kB  | 115 lines
 Plus:    +4kB  | +25 lines
-Total:   ~9kB 
+Total:   ~9kB
 ```
 
-**The in-memory store for entity-component and spatial systems.**  
+**The in-memory store for entity-component and spatial systems.**
 Type-indexed entities, grid-based spatial queries, compound filtering, and events — in a single file, with zero dependencies.
 
 ```js
@@ -19,8 +21,8 @@ import { createStore, where } from './tinyset.js'
 const store = createStore({ spatialGridSize: 100 })
 
 const player = store.create('player', { x: 100, y: 200, hp: 100 })
-store.create('enemy',  { x: 115, y: 210, hp: 50, tier: 'elite' })
-store.create('enemy',  { x: 400, y: 300, hp: 50, tier: 'normal' })
+store.create('enemy', { x: 115, y: 210, hp: 50, tier: 'elite' })
+store.create('enemy', { x: 400, y: 300, hp: 50, tier: 'normal' })
 
 // spatial query — grid-indexed, not a linear scan
 const nearby = store.near('enemy', player.x, player.y, 80).all()
@@ -31,7 +33,7 @@ const threats = store.find('enemy', where.and(
   where.gt('hp', 0)
 )).sort('hp').all()
 
-store.on('delete', e => console.log(`${e.type} destroyed`))
+store.on('delete', e => console.log(`${e.item.type} destroyed`))
 store.update(nearby[0].id, { hp: 0 })
 store.delete(nearby[0].id)
 ```
@@ -51,7 +53,9 @@ Tinyset is built specifically for systems where you need to:
 - Filter with compound predicates and chain results
 - React to changes through a lightweight event system
 - Run transactions that roll back cleanly on failure
+
 Tinyset handles typed entities, spatial queries, compound filters, and change events — the infrastructure you'd otherwise rebuild for every game, simulation, or collaborative app that needs to answer "what things are near here, and which ones match these conditions?"
+
 It's not a database or a framework. It's a small predictable layer: store entities with types, query by proximity and properties, react to changes, keep operations atomic.
 
 It wins on **mixed workloads** — the benchmark that reflects real game loops and collaborative apps, where creates, reads, updates, and deletes happen in every frame.
@@ -104,7 +108,6 @@ Tinyset is not the fastest at any single isolated operation. It is consistently 
 ## Installation
 
 ```bash
-# copy the single file into your project
 curl -O https://raw.githubusercontent.com/your-repo/tinyset/main/tinyset.js
 ```
 
@@ -118,24 +121,36 @@ Or just download `tinyset.js`. No build step. No package manager required. It's 
 
 ```js
 const store = createStore({
-  spatialGridSize: 100,   // grid cell size for spatial index (default 100)
-  types: new Set(['player', 'enemy', 'bullet']),  // optional type validation
+  spatialGridSize: 100,                          // grid cell size for spatial index (default 100)
+  types: new Set(['player', 'enemy', 'bullet']), // optional type validation
   defaults: {
-    enemy: { hp: 30, alive: true }  // default props per type
+    enemy: { hp: 30, alive: true }               // default props per type
   },
-  idGenerator: () => myCustomId(),  // optional custom ID function
-  enableBatch: true                 // enable batch/createMany operations
+  idGenerator: () => myCustomId()                // optional custom ID function
 })
 ```
 
-### Creating and mutating entities
+### Creating entities
 
 ```js
 // create — returns the new entity
 const enemy = store.create('enemy', { x: 100, y: 200, hp: 50 })
 
+// createMany — create multiple entities of the same type
+const enemies = store.createMany('enemy', [
+  { x: 100, y: 200, hp: 50 },
+  { x: 300, y: 400, hp: 30 }
+])
+```
+
+### Mutating entities
+
+```js
 // update — merges changes, updates modified timestamp
 store.update(enemy.id, { hp: 30 })
+
+// functional updater — receives current state, returns changes
+store.update(enemy.id, old => ({ hp: old.hp - 10 }))
 
 // set — single field shorthand
 store.set(enemy.id, 'hp', 30)
@@ -143,7 +158,7 @@ store.set(enemy.id, 'hp', 30)
 // increment — atomic field increment
 store.increment(enemy.id, 'score', 10)
 
-// delete
+// delete — returns the deleted entity
 store.delete(enemy.id)
 store.deleteMany([id1, id2, id3])
 ```
@@ -175,16 +190,20 @@ const alive = store.find('enemy', e => e.hp > 0).all()
 const nearby = store.near('enemy', x, y, radius).all()
 const nearAlive = store.near('enemy', x, y, 100, e => e.hp > 0).first()
 
+// count shorthand
+const total = store.count('enemy')
+const aliveCount = store.count('enemy', e => e.hp > 0)
+
 // query chain
 store.find('enemy', where.gt('hp', 0))
   .sort('hp')
   .limit(5)
   .offset(0)
-  .all()     // → array
-  .first()   // → first item or null
-  .last()    // → last item or null
-  .count()   // → number
-  .ids()     // → array of ids
+  .all()    // → array
+  .first()  // → first item or null
+  .last()   // → last item or null
+  .count()  // → number
+  .ids()    // → array of ids
 ```
 
 ### `where` predicates
@@ -209,6 +228,7 @@ where.or(where.eq('tier', 'boss'), where.gte('score', 500))
 ### Events
 
 ```js
+// subscribe — returns unsubscribe function
 const off = store.on('create', ({ id, item }) => { ... })
 store.on('update', ({ id, item, old }) => { ... })
 store.on('delete', ({ id, item }) => { ... })
@@ -228,21 +248,6 @@ store.transaction(() => {
   store.delete(playerId)
   store.create('ghost', { x: 100, y: 200 })
 })
-
-// silent batch — fires one 'batch' event instead of per-op events
-store.transaction(() => { ... }, { silent: true })
-```
-
-### Batch operations
-
-Requires `enableBatch: true` in store config.
-
-```js
-store.batch([
-  { type: 'create', data: { type: 'enemy', x: 100, y: 200 } },
-  { type: 'update', id: someId, changes: { hp: 10 } },
-  { type: 'delete', id: otherId }
-])
 ```
 
 ### Stats and introspection
@@ -256,10 +261,10 @@ store.stats()
 //   listeners: { change: 3 }
 // }
 
-store.dump()   // Map of all items (shallow copies)
+store.dump()   // plain object of all items (shallow copies)
 store.clear()  // removes everything, returns count
 ```
-just define what exists and ask questions about it the infrastructure is gone.
+
 ---
 
 ## tinyset+
@@ -279,16 +284,16 @@ const snapshot = store.sync.export(lastSyncTimestamp)
 const { applied } = store.sync.import(remoteSnapshot)
 
 // vector clock
-store.clock.current()   // → local counter
-store.clock.get()       // → { 'client-1': 42, 'client-2': 38 }
+store.clock.current()  // → local counter
+store.clock.get()      // → { 'client-1': 42, 'client-2': 38 }
 
 // operation journal
-store.journal.list()                        // → all recorded ops
+store.journal.list()                          // → all recorded ops
 store.journal.query({ type: 'create', since: timestamp })
-store.journal.on(op => sendToServer(op))    // stream ops as they happen
+store.journal.on(op => sendToServer(op))      // stream ops as they happen
 
 // merge two stores (e.g. after offline period)
-store.merge(otherStore, 'timestamp')  // last-write-wins by modified timestamp
+store.merge(otherStore, 'timestamp')          // last-write-wins by modified timestamp
 ```
 
 ### Distribution benchmark (Node v24, AMD FX-6350)
@@ -323,4 +328,3 @@ Memory overhead for distribution: **+74%** per item (667 bytes → 879 bytes) du
 - **Single-process.** The base store has no built-in sync. Use `tinyset+` for multi-client or multi-process scenarios.
 - **No schema enforcement by default.** Pass `types` to the store config for runtime type validation. Field types are not validated — tinyset is not a typed database.
 - **Read performance trades off for write safety.** `store.get()` returns a shallow copy to prevent external mutation. Use `store.getRef()` for the live reference when performance matters and you won't mutate it.
-
