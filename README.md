@@ -8,9 +8,9 @@ TinySet provides a unified data layer that works identically in browsers, Node.j
 > The code written with TinySet reads like the question you're asking, not like the data structure that's querying it.
 
 ```
-Core:    ~5kB  | 142 lines
+Core:    ~8kB  | 185 lines
 Plus:    +4kB  | +24 lines
-Total:   ~9kB
+Total:   ~12kB
 ```
 
 **The in-memory store for entity-component and spatial systems.**
@@ -39,7 +39,7 @@ store.update(nearby[0].id, { hp: 0 })
 store.delete(nearby[0].id)
 ```
 
-In a vanilla implementation, the equivalent store infrastructure — type indexes, spatial grid, event emitter, compound filtering — is **40–80 lines before you write any game logic**. With tinyset it's two lines of setup. For files where entity management is the main job, that's typically a **40–75% reduction in meaningful lines**.
+In a vanilla implementation, the equivalent store infrastructure — type indexes, spatial grid, event emitter, compound filtering — is **40–80 lines before you write any game logic**. With TinySet it's two lines of setup. For files where entity management is the main job, that's typically a **40–75% reduction in meaningful lines**.
 
 ---
 
@@ -65,44 +65,73 @@ It wins on **mixed workloads** — the benchmark that reflects real game loops a
 
 ## Benchmarks
 
-All benchmarks run on Node v24, AMD FX-6350, compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
+All benchmarks run on Node v24, AMD FX-6350, median of 15 runs. Compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
 
-### Mixed workload — 10,000 operations (create + read + update + delete)
+### Mixed workload — 10,000 operations (40% read, 20% update, 20% simple find, 20% compound find)
 
 | Library | ops/sec |
 |---|---|
-| **TinySet** | **21,655** |
-| MemoryCache | 14,062 |
-| NodeCache | 11,579 |
-| Immutable | 10,500 |
-| Array Store | ~8,500 |
-| Object Store | 3,734 |
+| **TinySet** | **52,005** |
+| LokiJS | 50,710 |
+| MemoryCache | 13,810 |
+| Lodash | ~14,000 |
+| NodeCache | ~13,000 |
+| Immutable | ~10,000 |
+| Array Store | ~9,500 |
+| Object Store | ~4,300 |
 
-TinySet wins this category by ~54% over the next competitor. Isolated read or write microbenchmarks favour simpler structures — but real systems don't run isolated operations.
+TinySet leads this category. The closest competitor is LokiJS at 50,710 ops/sec — a ~3% margin. LokiJS has a native B-tree field index that gives it an advantage on compound queries specifically; TinySet closes that gap with a hot/cold query cache that promotes frequently-used compound predicates to sub-0.01ms lookup. Every other library trails by 3× or more.
 
-### Spatial queries — average latency per query
+The mixed workload is the benchmark that matters. Isolated read or write microbenchmarks favour specialised structures — real systems don't run isolated operations.
 
-| Library | Avg latency |
+### Create performance — 10,000 items
+
+| Library | ops/sec |
 |---|---|
-| **TinySet (filtered)** | **0.001ms** |
-| **TinySet** | **0.004ms** |
-| RBush | 0.060ms |
-| Flatbush | 0.073ms |
+| **TinySet** | **820K** |
+| LokiJS | 646K |
+| Lodash | ~500K |
+| Array Store | ~420K |
+| Object Store | ~320K |
 
-**15–73× faster than dedicated spatial libraries.** The reason is architectural: TinySet's grid cell index co-locates type filtering with proximity search. RBush and Flatbush do geometry only — type filtering is a separate pass. TinySet does both in one sweep.
+TinySet now leads creates, beating LokiJS by ~27%. The counter-based id generator (replacing `Date.now() + Math.random()`) and a single `Date.now()` call per write account for most of the improvement.
+
+### Read performance — 100,000 random reads
+
+| Library | ops/sec |
+|---|---|
+| **TinySet (ref)** | **39.8M** |
+| Object Store | 15M |
+| MemoryCache | 12.7M |
+| Array Store | 10.9M |
+| TinySet (safe get) | 8.9M |
+
+`store.getRef()` returns the live object directly — 39.8M ops/sec. `store.get()` returns a shallow copy for external safety — 8.9M ops/sec. Use `getRef()` in hot paths where you won't mutate the result.
+
+### Query performance — avg latency per query, 10,000 entities
+
+| Library | Simple | Compound |
+|---|---|---|
+| **TinySet** | **<0.01ms** | **<0.01ms** |
+| LokiJS | 0.09ms | 0.72ms |
+| MemoryCache | 1.1ms | N/A |
+| Array Store | 3.6ms | N/A |
+| Object Store | 7.8ms | N/A |
+
+TinySet's hot/cold query cache promotes repeated queries — including compound `where.and`/`where.or` predicates — to frozen Q objects returned in under 0.01ms. LokiJS is the only other library that supports compound operators natively, at 0.72ms for the complex path.
 
 ### Other categories
 
 | Category | TinySet | Fastest overall |
 |---|---|---|
-| Create (10k items) | 270K ops/sec | LokiJS 703K |
-| Read — safe get (100k) | 3.3M ops/sec | MemoryCache 12M |
-| Read — ref (100k) | 7.5M ops/sec | — |
-| Update (50k) | 845K ops/sec | Lodash 2.4M |
-| Query — compound filter | 1.3ms | Only tinyset supports this |
-| Memory per item | 667 bytes | LokiJS 565 bytes |
+| Update (50k) | 616K ops/sec | Lodash 2.6M |
+| Memory per item | ~667 bytes | LokiJS 565 bytes |
 
-TinySet is not the fastest at any single isolated operation. It is consistently fast across all of them, and fastest at the workloads that combine them.
+### Spatial queries
+
+TinySet's spatial index is built for **entity queries**, not raw geometry throughput. `store.near('enemy', x, y, radius)` searches only the enemy type index — in a mixed-type store this eliminates 50–90% of candidates before any distance calculation.
+
+For pure geometry performance, dedicated spatial libraries are faster: RBush at ~0.013ms vs TinySet at ~0.22ms per query. If your workload is purely geometric without type filtering, RBush or Flatbush is the right choice. If you need `"find all enemies within range that match these conditions"` in one call, TinySet handles it natively.
 
 ---
 
@@ -210,7 +239,7 @@ store.find('enemy', where.gt('hp', 0))
 ### `where` predicates
 
 ```js
-where.eq('type', 'elite')
+where.eq('tier', 'elite')
 where.ne('status', 'dead')
 where.gt('hp', 50)
 where.gte('level', 10)
@@ -221,9 +250,10 @@ where.contains('name', 'Sword')
 where.startsWith('id', 'player-')
 where.exists('target')
 
-// compose
+// compose — all tagged predicates produce stable cache keys
 where.and(where.eq('tier', 'elite'), where.gt('hp', 0))
 where.or(where.eq('tier', 'boss'), where.gte('score', 500))
+where.and(where.or(where.eq('zone', 'a'), where.eq('zone', 'b')), where.gt('hp', 0))
 ```
 
 ### Events
@@ -307,7 +337,7 @@ store.merge(otherStore, 'timestamp')          // last-write-wins by modified tim
 | Export (1K ops) | 311K ops/sec |
 | Affine batch apply (10K items) | 158M items/sec |
 
-Memory overhead for distribution: **+74%** per item (667 bytes → 879 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyset+`.
+Memory overhead for distribution: **+74%** per item (~667 bytes → ~879 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyset+`.
 
 ---
 
@@ -317,7 +347,9 @@ Memory overhead for distribution: **+74%** per item (667 bytes → 879 bytes) du
 
 **Optimised for mixed workloads.** Microbenchmark winners (Lodash, MemoryCache) are specialised — they do one thing fast. Real systems do everything at once. TinySet is designed for that.
 
-**Spatial and type indexing are first-class.** Not an afterthought or plugin. The grid cell index and type index are maintained on every write and queried together. This is why spatial queries beat dedicated spatial libraries.
+**Spatial and type indexing are first-class.** Not an afterthought or plugin. The grid cell index and type index are maintained on every write and queried together. `store.near('enemy', x, y, r)` is one call — type filtering and proximity search happen in a single pass.
+
+**Hot/cold query cache.** Repeated `find()` calls with the same predicate — including compound `where.and`/`where.or` chains — are promoted to a hot tier after three hits and return in under 0.01ms. Writes invalidate only the cache entries for the affected type, so querying players is unaffected by enemy updates. The cache is transparent: no configuration, no manual invalidation.
 
 **Two tiers with one API.** `tinyset.js` is the foundation — no distribution overhead, pure local performance. `tinyset+` is the ecosystem — distribution, sync, journaling — built on top of the same store. Switching between them requires changing one import line.
 
@@ -329,3 +361,4 @@ Memory overhead for distribution: **+74%** per item (667 bytes → 879 bytes) du
 - **Single-process.** The base store has no built-in sync. Use `tinyset+` for multi-client or multi-process scenarios.
 - **No schema enforcement by default.** Pass `types` to the store config for runtime type validation. Field types are not validated — tinyset is not a typed database.
 - **Read performance trades off for write safety.** `store.get()` returns a shallow copy to prevent external mutation. Use `store.getRef()` for the live reference when performance matters and you won't mutate it.
+- **Query cache cost on write-heavy workloads.** The hot cache adds a small overhead per write to maintain per-type version counters. Workloads that are predominantly writes with few repeated queries see a modest regression versus a bare Map store. The cache can be worked around by always using inline predicates (`e => e.hp > 0` rather than `where.gt('hp', 0)`) which bypass the hot tier.
