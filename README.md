@@ -1,7 +1,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 # tinyop.js
 
-Typed entities. Spatial queries. Reactive events. One file.
+Tinyop is a typed entity store with spatial indexing, reactive events, and compound queries. 8kB, zero dependencies. The infrastructure you'd otherwise rebuild.
 
 tinyop provides a unified data layer that works identically in browsers, Node.js, and React Native. The core library handles local state with advanced querying; the optional `+` extension adds distributed features with causal consistency.
 
