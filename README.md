@@ -8,8 +8,8 @@ tinyop provides a unified data layer that works identically in browsers, Node.js
 > The code written with tinyop reads like the question you're asking, not like the data structure that's querying it.
 
 ```
-Core:    ~8kB  | 185 lines
-Plus:    +4kB  | +24 lines
+Core:    9kB  | 185 lines
+Plus:    +4.6kB  | +24 lines
 Total:   ~12kB
 ```
 
