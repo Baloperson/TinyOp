@@ -43,7 +43,7 @@ store.update(nearby[0].id, { value: 0 })
 store.delete(nearby[0].id)
 ```
 
-In a vanilla implementation, the equivalent store infrastructure — type indexes, spatial grid, event emitter, compound filtering — is **40–80 lines before you write any game logic**. With tinyop it's two lines of setup. For files where entity management is the main job, that's typically a **40–75% reduction in meaningful lines**.
+In a vanilla implementation, the equivalent store infrastructure — type indexes, spatial grid, event emitter, compound filtering — is **40–80 lines before you write any application logic**. With tinyop it's two lines of setup. For files where entity management is the main job, that's typically a **40–75% reduction in meaningful lines**.
 
 ---
 
@@ -63,7 +63,7 @@ tinyop handles typed entities, spatial queries, compound filters, and change eve
 
 It's not a database or a framework. It's a small predictable layer: store entities with types, query by proximity and properties, react to changes, keep operations atomic.
 
-It wins on **mixed workloads** — the benchmark that reflects real game loops and collaborative apps, where creates, reads, updates, and deletes happen in every frame.
+It wins on **mixed workloads** — the benchmark that reflects real application loops where creates, reads, updates, and deletes happen together.
 
 ---
 
@@ -71,8 +71,7 @@ It wins on **mixed workloads** — the benchmark that reflects real game loops a
 
 All benchmarks run on Node v24, Intel Xeon Platinum 8370C, median of 15 runs. Compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
 
-> **Hardware variance.** Absolute numbers scale with your CPU — expect 2–3× lower figures on older or low-power hardware (Tested on AMD FX-6350 scores roughly half these numbers). What stays stable across machines is the *relative ordering*
-
+> **Hardware variance.** Absolute numbers scale with your CPU — an AMD FX-6350 scores roughly half these figures. What stays stable across machines is the *relative ordering*. Run `node bench.js` to measure on your own hardware.
 
 ### Mixed workload — 10,000 operations (40% read, 20% update, 20% simple find, 20% compound find)
 
@@ -101,7 +100,7 @@ The mixed workload is the benchmark that matters. Isolated read or write microbe
 | Array Store | ~420K |
 | Object Store | ~320K |
 
-tinyop now leads creates, beating LokiJS by ~27%. The counter-based id generator (replacing `Date.now() + Math.random()`) and a single `Date.now()` call per write account for most of the improvement.
+tinyop leads creates, beating LokiJS by ~27%. The counter-based id generator (replacing `Date.now() + Math.random()`) and a single `Date.now()` call per write account for most of the improvement.
 
 ### Read performance — 100,000 random reads
 
@@ -111,7 +110,7 @@ tinyop now leads creates, beating LokiJS by ~27%. The counter-based id generator
 | Object Store | 15M |
 | MemoryCache | 12.7M |
 | Array Store | 10.9M |
-| tinyop (safe get) | 8.9M |
+| tinyop (safe get) | 12.1M |
 
 `store.getRef()` returns the live object directly — 112.7M ops/sec. `store.get()` returns a shallow copy for external safety — 12.1M ops/sec. Use `getRef()` in hot paths where you won't mutate the result.
 
@@ -136,16 +135,16 @@ tinyop's hot/cold query cache promotes repeated queries — including compound `
 
 ### Spatial queries
 
-tinyop's spatial index is built for **entity queries**, not raw geometry throughput. `store.near('enemy', x, y, radius)` searches only the enemy type index — in a mixed-type store this eliminates 50–90% of candidates before any distance calculation.
+tinyop's spatial index is built for **entity queries**, not raw geometry throughput. `store.near('typeA', x, y, radius)` searches only the typeA index — in a mixed-type store this eliminates 50–90% of candidates before any distance calculation.
 
-For pure geometry performance, dedicated spatial libraries are faster: RBush at ~0.013ms vs tinyop at ~0.22ms per query. If your workload is purely geometric without type filtering, RBush or Flatbush is the right choice. If you need `"find all enemies within range that match these conditions"` in one call, tinyop handles it natively.
+For pure geometry performance, dedicated spatial libraries are faster: RBush at ~0.013ms vs tinyop at ~0.22ms per query. If your workload is purely geometric without type filtering, RBush or Flatbush is the right choice. If you need `"find all entities within range that match these conditions"` in one call, tinyop handles it natively.
 
 ---
 
 ## Installation
 
 ```bash
-curl -O https://github.com/Baloperson/TinyOp/main/tinyop.js
+curl -O https://raw.githubusercontent.com/Baloperson/TinyOp/main/tinyop.js
 ```
 
 Or just download `tinyop.js`. No build step. No package manager required. It's one file.
@@ -154,9 +153,7 @@ Or just download `tinyop.js`. No build step. No package manager required. It's o
 
 ## API
 
-
-
-###Creating a store
+### Creating a store
 
 ```js
 const store = createStore({
@@ -165,11 +162,11 @@ const store = createStore({
   defaults: {
     foo: { count: 0, active: true }              // default props per type
   },
-  idGenerator: () => customId()                   // optional custom ID function
+  idGenerator: () => customId()                  // optional custom ID function
 })
 ```
 
-###Creating entities
+### Creating entities
 
 ```js
 // create — returns the new entity
@@ -182,7 +179,7 @@ const items = store.createMany('foo', [
 ])
 ```
 
-###Mutating entities
+### Mutating entities
 
 ```js
 // update — merges changes, updates modified timestamp
@@ -202,7 +199,23 @@ store.delete(item.id)
 store.deleteMany([id1, id2, id3])
 ```
 
-###Reading entities
+### Batch operations
+
+```js
+// batch.create — alias for createMany
+store.batch.create('foo', [{ count: 1 }, { count: 2 }])
+
+// batch.update — silent per-item writes, one 'batch' event
+store.batch.update([
+  { id: id1, changes: { count: 10 } },
+  { id: id2, changes: { count: 20 } }
+])
+
+// batch.delete — alias for deleteMany
+store.batch.delete([id1, id2, id3])
+```
+
+### Reading entities
 
 ```js
 // safe get — returns a shallow copy
@@ -218,7 +231,7 @@ const fields = store.pick(id, ['x', 'y'])
 if (store.exists(id)) { ... }
 ```
 
-###Querying
+### Querying
 
 ```js
 // find by type with optional predicate
@@ -245,7 +258,7 @@ store.find('foo', where.gt('count', 0))
   .ids()    // → array of ids
 ```
 
-###where predicates
+### `where` predicates
 
 ```js
 where.eq('status', 'active')
@@ -265,7 +278,7 @@ where.or(where.eq('mode', 'auto'), where.gte('priority', 5))
 where.and(where.or(where.eq('zone', '1'), where.eq('zone', '2')), where.gt('value', 0))
 ```
 
-###Events
+### Events
 
 ```js
 // subscribe — returns unsubscribe function
@@ -273,13 +286,14 @@ const off = store.on('create', ({ id, item }) => { ... })
 store.on('update', ({ id, item, old }) => { ... })
 store.on('delete', ({ id, item }) => { ... })
 store.on('change', ({ type, id, item }) => { ... })  // all changes
+store.on('batch', ({ op, count }) => { ... })        // batch operations
 
 store.once('create', callback)  // fires once then removes itself
 
 off()  // unsubscribe
 ```
 
-###Transactions
+### Transactions
 
 ```js
 // all-or-nothing — rolls back on throw
@@ -290,7 +304,7 @@ store.transaction(() => {
 })
 ```
 
-###Stats and introspection
+### Stats and introspection
 
 ```js
 store.stats()
@@ -305,9 +319,10 @@ store.dump()   // plain object of all items (shallow copies)
 store.clear()  // removes everything, returns count
 ```
 
-
+---
 
 ## Tests
+
 ```bash
 node --test test.js
 ```
@@ -365,9 +380,9 @@ Memory overhead for distribution: **+81%** per item (~473 bytes → ~856 bytes) 
 
 **Optimised for mixed workloads.** Microbenchmark winners (Lodash, MemoryCache) are specialised — they do one thing fast. Real systems do everything at once. tinyop is designed for that.
 
-**Spatial and type indexing are first-class.** Not an afterthought or plugin. The grid cell index and type index are maintained on every write and queried together. `store.near('enemy', x, y, r)` is one call — type filtering and proximity search happen in a single pass.
+**Spatial and type indexing are first-class.** Not an afterthought or plugin. The grid cell index and type index are maintained on every write and queried together. `store.near('typeA', x, y, r)` is one call — type filtering and proximity search happen in a single pass.
 
-**Hot/cold query cache.** Repeated `find()` calls with the same predicate — including compound `where.and`/`where.or` chains — are promoted to a hot tier after three hits and return in under 0.01ms. Writes invalidate only the cache entries for the affected type, so querying players is unaffected by enemy updates. The cache is transparent: no configuration, no manual invalidation.
+**Hot/cold query cache.** Repeated `find()` calls with the same predicate — including compound `where.and`/`where.or` chains — are promoted to a hot tier after three hits and return in under 0.01ms. Writes invalidate only the cache entries for the affected type, so querying one type is unaffected by writes to another. The cache is transparent: no configuration, no manual invalidation.
 
 **Two tiers with one API.** `tinyop.js` is the foundation — no distribution overhead, pure local performance. `tinyop+` is the ecosystem — distribution, sync, journaling — built on top of the same store. Switching between them requires changing one import line.
 
@@ -379,5 +394,5 @@ Memory overhead for distribution: **+81%** per item (~473 bytes → ~856 bytes) 
 - **Single-process.** The base store has no built-in sync. Use `tinyop+` for multi-client or multi-process scenarios.
 - **No schema enforcement by default.** Pass `types` to the store config for runtime type validation. Field types are not validated — tinyop is not a typed database.
 - **Read performance trades off for write safety.** `store.get()` returns a shallow copy to prevent external mutation. Use `store.getRef()` for the live reference when performance matters and you won't mutate it.
-- **Query cache cost on write-heavy workloads.** The hot cache adds a small overhead per write to maintain per-type version counters. Workloads that are predominantly writes with few repeated queries see a modest regression versus a bare Map store. The cache can be worked around by always using inline predicates (`e => e.hp > 0` rather than `where.gt('hp', 0)`) which bypass the hot tier.
-- ** TinyOp falls behind for workloads that are very small and where querys are not called repeatedly  
+- **Query cache overhead on write-heavy workloads.** The hot cache adds a small overhead per write to maintain per-type version counters. Workloads that are predominantly writes with few repeated queries see a modest regression versus a bare Map store. Use inline predicates (`e => e.count > 0` rather than `where.gt('count', 0)`) to bypass the hot tier when needed.
+- **Small stores with non-repeated queries see no cache benefit.** The hot/cold cache pays off when the same predicate is called multiple times between writes. For one-shot queries over a handful of entities, a plain Map is faster.
