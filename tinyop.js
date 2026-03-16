@@ -11,8 +11,15 @@
 // GNU General Public License for more details.
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// tinyop.js v2.9
-// _key: stable serialised string on all where.* predicates — enables compound query caching
+// tinyop.js v3.0
+
+// counter ids: 52x faster than Date+random, unique per store; override via idGenerator
+// in-place mutation on update: get() returns copy, getRef() exposes live ref intentionally  
+// numeric spatial key cx*1e6+cy: no string alloc, 5x faster Map lookup than template literal
+// single Date.now() per write, emit skipped when no listeners registered
+// query cache: zero-warmup single-tier, nested Map<type,Map<key,Q>> evicts in O(1) on write
+// compound where.and/or carry _key when all args are tagged — cacheable without fn identity
+
 const _k=(f,key)=>{f._key=key;return f}
 export const where={
 eq: (k,v)=>_k(i=>i[k]===v,  `eq:${k}:${v}`),
@@ -33,18 +40,13 @@ or: (...fs)=>{const f=i=>fs.some(fn=>fn(i)); const ks=fs.map(x=>x?._key);f._key=
 export function createStore(o={}){
 const items=new Map(),meta=new Map(),listeners=new Map()
 const idx={type:new Map(),spatial:new Map(),coords:new Map()}
-
-// v2.7: counter id 52x faster than Date+random, still unique per store instance
-// set idGenerator in options to override (e.g. for distributed scenarios)
 let _id=0
 const cfg={
 id:o.idGenerator||(()=>String(++_id)),
 types:o.types||new Set(),defs:o.defaults||{},grid:o.spatialGridSize||100
 }
-
 meta.set('cfg',cfg)
 
-// v2.7: emit only when listeners exist skip Map.get + forEach when no subscribers
 const emit=(e,d)=>{const s=listeners.get(e);if(s&&s.size)s.forEach(cb=>{try{cb(d)}catch{}})}
 
 const ui=(a,it,old)=>{
@@ -53,9 +55,7 @@ if(!t)idx.type.set(it.type,t=new Set())
 if(a=='add')t.add(it.id)
 else if(a=='remove')t.delete(it.id)
 else if(a=='update'&&old?.type!==it.type){idx.type.get(old.type)?.delete(it.id);t.add(it.id)}
-
 if(it.x!=null){
-// v2.7: numeric spatial key — no string allocation, 5x faster Map lookup
 const g=cfg.grid,cx=Math.floor(it.x/g),cy=Math.floor(it.y/g),k=cx*1e6+cy
 idx.coords.set(it.id,{x:it.x,y:it.y})
 if(a=='add'){if(!idx.spatial.has(k))idx.spatial.set(k,new Set());idx.spatial.get(k).add(it.id)}
@@ -67,21 +67,15 @@ if(ok!==k){idx.spatial.get(ok)?.delete(it.id);if(!idx.spatial.has(k))idx.spatial
 }
 
 const w=(id,ch,o={})=>{
-// v2.7: single Date.now() call per write (was 2)
-const now=Date.now()
-const old=items.get(id)
-const changes=typeof ch==='function'?ch(old):ch
-
-// v2.7: update mutates in-place instead of spreading a new object
-// get() returns a copy so external refs are safe; getRef() intentionally exposes live obj
-// old snapshot taken before mutation so update events receive correct prior state
+const now=Date.now(),old=items.get(id),changes=typeof ch==='function'?ch(old):ch
 let it
 if(old){
-// snapshot old state for event emission before mutating
-const snap=o.silent?null:{...old}
+const inTx=!!meta.get('tx')
+const prev={type:old.type,x:old.x,y:old.y}
+const snap=(!o.silent||inTx)?{...old}:null
 Object.assign(old,changes);old.modified=now;it=old
 if(cfg.types.size&&!cfg.types.has(it.type))throw Error(`Invalid type: ${it.type}`)
-items.set(id,it);ui('update',it,snap);qbump(it.type)
+items.set(id,it);ui('update',it,prev);qbump(it.type)
 if(!o.silent){emit('update',{id,item:it,old:snap});emit('change',{type:'update',id,item:it})}
 meta.get('tx')?.at(-1)?.push({type:'update',id,old:snap,new:{...it}})
 }else{
@@ -99,12 +93,10 @@ const ts=idx.type.get(type);if(!ts)return[]
 const g=cfg.grid,m=max*max
 const minCX=Math.floor((x-max)/g),maxCX=Math.floor((x+max)/g)
 const minCY=Math.floor((y-max)/g),maxCY=Math.floor((y+max)/g)
-
 const cand=new Set()
 for(let cx=minCX;cx<=maxCX;cx++)
 for(let cy=minCY;cy<=maxCY;cy++)
 idx.spatial.get(cx*1e6+cy)?.forEach(id=>ts.has(id)&&cand.add(id))
-
 const r=[]
 for(const id of cand){
 const p0=idx.coords.get(id);if(!p0)continue
@@ -120,51 +112,33 @@ limit:n=>Q(a.slice(0,n)),offset:n=>Q(a.slice(n)),
 sort:f=>Q([...a].sort((x,y)=>{const A=x[f]??0,B=y[f]??0;return A<B?-1:A>B?1:0}))
 })
 
-// hot/cold query cache
-// cold: Map keyed by string (tagged predicates) or fn reference (inline/compound-with-inline)
-// hot:  Map<type, Map<predKey, Q>> — nested by type so qbump evicts in O(1) via .clear()
-//       promoted after THRESH cold hits; returns frozen Q, bypasses version check
-// per-type version counters: write to 'enemy' never touches 'player' cache entries
-// compound where.and/or carry _key when all sub-predicates are tagged — now cacheable
-const qc=new Map(),qv=new Map(),qh=new Map()
-const THRESH=3
+// qh: Map<type,Map<key,Q>> for tagged predicates — evict by type in O(1)
+// qh: Map<fnRef,Map<type,Q>> for inline predicates — delete type entry on bump
+// zero warmup: miss populates immediately, hit returns on next call
+const qh=new Map(),qv=new Map()
 const qbump=t=>{
   qv.set(t,(qv.get(t)||0)+1)
-  qh.get(t)?.clear()  // O(1) — clears inner Map for this type only
+  qh.get(t)?.clear()
+  for(const[k,v]of qh)if(typeof k!=='string'&&v instanceof Map)v.delete(t)
 }
 
 const find=(t,p)=>{
-const sk=p?._key,ck=sk!=null?sk:null
-// hot path: tagged predicates only, nested by type — two Map.get calls, no version check
-if(ck){const hm=qh.get(t);if(hm){const q=hm.get(ck);if(q)return q}}
-const ver=qv.get(t)||0
-// cold path: string key
-if(ck){
-  const c=qc.get(`${t}\0${ck}`)
-  if(c&&c.ver===ver){
-    if(++c.h>=THRESH){
-      const q=Q(c.r)
-      if(!qh.has(t))qh.set(t,new Map())
-      qh.get(t).set(ck,q);return q
-    }
-    return Q(c.r)
-  }
+const ck=p?._key??null
+if(ck!=null){
+  const hm=qh.get(t);if(hm){const q=hm.get(ck);if(q)return q}
   const ts=idx.type.get(t),r=[]
   if(ts)for(const id of ts){const it=items.get(id);if(it&&(!p||p(it)))r.push(it)}
-  qc.set(`${t}\0${ck}`,{ver,r,h:0});return Q(r)
+  const q=Q(r);if(!qh.has(t))qh.set(t,new Map());qh.get(t).set(ck,q);return q
 }
-// ref key: inline functions and compounds containing inline predicates
 const rk=p||'__none__'
-if(!qc.has(rk))qc.set(rk,new Map())
-const m=qc.get(rk),c=m.get(t)
-if(c&&c.ver===ver)return Q(c.r)
+if(!qh.has(rk))qh.set(rk,new Map())
+const m=qh.get(rk),c=m.get(t);if(c)return c
 const ts=idx.type.get(t),r=[]
 if(ts)for(const id of ts){const it=items.get(id);if(it&&(!p||p(it)))r.push(it)}
-m.set(t,{ver,r});return Q(r)
+const q=Q(r);m.set(t,q);return q
 }
 
 const near=(t,x,y,d,p)=>Q(spatial(t,x,y,d,p))
-
 const get=id=>{const it=items.get(id);return it?{...it}:null}
 const ref=id=>items.get(id)||null
 const pick=(id,f)=>{const it=items.get(id);if(!it)return null;const o={};for(const k of f)o[k]=it[k];return o}
@@ -181,16 +155,27 @@ const tx=fn=>{
 const t=meta.get('tx')||[];meta.set('tx',[...t,[]])
 try{const r=fn();meta.set('tx',t);return r}
 catch(e){
-// rollback: restore snapshots recorded during the transaction
 for(const op of meta.get('tx').pop().reverse()){
-if(op.type=='create')items.delete(op.id)
+if(op.type=='create'){items.delete(op.id);ui('remove',op.new||{id:op.id,type:'__none__'})}
 else if(op.type=='update'){items.set(op.id,op.old);ui('update',op.old,op.new)}
-else items.set(op.id,op.item)
+else{items.set(op.id,op.item);ui('add',op.item,null)}
 }
 meta.set('tx',t);throw e}
 }
 
 const createOne=(t,p={})=>w(p.id||cfg.id(),{type:t,...cfg.defs[t],...p})
+const _batchUpdate=updates=>{
+  const res=[]
+  for(const{id,changes}of updates){const r=items.has(id)?w(id,changes,{silent:true}):null;if(r)res.push(r)}
+  if(res.length){emit('batch',{op:'update',count:res.length});emit('change',{type:'batch',op:'update',count:res.length})}
+  return res
+}
+const _batchDelete=ids=>{
+  const del=[]
+  for(const id of ids){const it=rm(id);if(it)del.push(it)}
+  if(del.length){emit('batch',{op:'delete',count:del.length});emit('change',{type:'batch',op:'delete',count:del.length})}
+  return del
+}
 
 return{
 create:createOne,
@@ -198,30 +183,22 @@ createMany:(t,arr)=>arr.map(p=>createOne(t,p)),
 update:(id,c)=>items.has(id)?w(id,c):null,
 set:(id,f,v)=>items.has(id)?w(id,{[f]:v}):null,
 increment:(id,f,b=1)=>{const it=items.get(id);return it?w(id,{[f]:(it[f]||0)+b}):null},
-
 get,getRef:ref,pick,exists:id=>items.has(id),
-
 find,near,count:(t,p)=>find(t,p).count(),
-
-delete:rm,deleteMany:ids=>ids.map(id=>rm(id)),
-
+delete:rm,deleteMany:ids=>_batchDelete(ids),
+batch:{create:(t,arr)=>arr.map(p=>createOne(t,p)),update:_batchUpdate,delete:_batchDelete},
 clear:()=>{const c=items.size;items.clear();idx.type.clear();idx.spatial.clear();idx.coords.clear();return c},
-
 transaction:tx,
-
 on:(e,cb)=>{if(!listeners.has(e))listeners.set(e,new Set());listeners.get(e).add(cb);return()=>listeners.get(e)?.delete(cb)},
 once:(e,cb)=>{if(!listeners.has(e))listeners.set(e,new Set());let w=d=>{cb(d);listeners.get(e)?.delete(w)};listeners.get(e).add(w);return()=>listeners.get(e)?.delete(w)},
 off:(e,cb)=>listeners.get(e)?.delete(cb),
-
 dump:()=>Object.fromEntries([...items].map(([k,v])=>[k,{...v}])),
-
 stats:()=>({
 items:items.size,
 types:Object.fromEntries([...idx.type].map(([t,s])=>[t,s.size])),
 spatial:{cells:idx.spatial.size,coords:idx.coords.size},
 listeners:Object.fromEntries([...listeners].map(([e,s])=>[e,s.size]))
 }),
-
 meta:{get:k=>meta.get(k),set:(k,v)=>meta.set(k,v),config:()=>({...cfg})}
 }
 }
