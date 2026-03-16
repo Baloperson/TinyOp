@@ -11,11 +11,10 @@
 // GNU General Public License for more details.
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// tinyop.js v3.1
+// tinyop.js v3.2
 // counter ids: 52x faster than Date+random, unique per store; override via idGenerator
 // in-place mutation on update: get() returns copy, getRef() exposes live ref intentionally  
-// numeric spatial key cx*1e9+cy: no string alloc, 5x faster Map lookup than template literal 
-// 1e9 ensures no collisions for worlds up to 100 billion units tall (gridSize=100)
+// numeric spatial key cx*1e9+cy: no string alloc, 5x faster Map lookup than template literal
 // single Date.now() per write, emit skipped when no listeners registered
 // query cache: zero-warmup single-tier, nested Map<type,Map<key,Q>> evicts in O(1) on write
 // compound where.and/or carry _key when all args are tagged — cacheable without fn identity
@@ -153,7 +152,7 @@ m.set(t,q);return q
 const near=(t,x,y,d,p)=>Q(spatial(t,x,y,d,p))
 const get=id=>{const it=items.get(id);return it?{...it}:null}
 const ref=id=>items.get(id)||null
-const pick=(id,f)=>{const it=items.get(id);if(!it)return null;const o={};for(const k of f){const v=it[k];o[k]=v&&typeof v==='object'?Array.isArray(v)?[...v]:{...v}:v}return o}
+const pick=(id,f)=>{const it=items.get(id);if(!it)return null;const o={};for(const k of f){const v=it[k];o[k]=v&&typeof v==='object'?structuredClone(v):v}return o}
 
 const rm=id=>{
 const it=items.get(id);if(!it)return null
@@ -168,7 +167,7 @@ const t=meta.get('tx')||[];meta.set('tx',[...t,[]])
 try{const r=fn();meta.set('tx',t);return r}
 catch(e){
 for(const op of meta.get('tx').pop().reverse()){
-if(op.type=='create'){items.delete(op.id);ui('remove',op.new||{id:op.id,type:'__none__'})}
+if(op.type=='create'){items.delete(op.id);ui('remove',op.new)}
 else if(op.type=='update'){items.set(op.id,op.old);ui('update',op.old,op.new)}
 else{items.set(op.id,op.item);ui('add',op.item,null)}
 }
