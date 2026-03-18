@@ -11,7 +11,7 @@
 // GNU General Public License for more details.
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-import {createStore as createBaseStore}from'./tinyset.js'
+import {createStore as createBaseStore}from'./tinyop.js'
 export function createStore(opts={}){
 const store=createBaseStore(opts)
 const cfg={pid:opts.processId||`p-${Math.random().toString(36).slice(2,6)}`,batchDelay:opts.batchDelay||16,maxJournal:opts.maxJournalSize||10000,syncUrl:opts.syncUrl||null}
