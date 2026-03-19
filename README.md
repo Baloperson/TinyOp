@@ -4,152 +4,187 @@
 
 Works anywhere with JavaScript and memory.
 
-Tinyop is a typed entity store with spatial indexing, reactive events, and compound queries. 10kB, zero dependencies. The infrastructure you'd otherwise rebuild.
+Tinyop is a typed entity store with spatial indexing, reactive events, and compound queries. ~10kB, zero dependencies.
 
-tinyop provides a unified data layer that works identically in browsers, Node.js, and React Native. The core library handles local state with advanced querying; the optional `+` extension adds distributed features with causal consistency.
-
-> The code written with tinyop reads like the question you're asking, not like the data structure that's querying it.
+> The code written with tinyop reads like the question you're asking, not like the data structure answering it.
 
 ```
-Core:    10kB  | ~185 lines
-Plus:    +4.6kB  | +~24 lines
-Total:   ~15kB
+Core:   ~10kB  | ~190 lines
+Plus:   +4.6kB | +~24 lines
+Total:  ~14kB
 ```
 
-**The in-memory store for entity-component and spatial systems.**
-Type-indexed entities, grid-based spatial queries, compound filtering, and events — in a single file, with zero dependencies.
+---
+
+## What it is
+
+Tinyop stores **typed entities** — plain objects with an `id`, a `type`, and any fields you choose. It maintains indexes automatically so you can retrieve them instantly by type, filter them with compound predicates, find them by spatial proximity, and react to changes through events — all in a single in-memory structure with zero configuration.
+
+It is not a database. It is not an ORM. It is not a reactive state framework. It is the infrastructure layer those things would need to build on: a fast, indexed, queryable collection that behaves predictably and composes with whatever is around it.
 
 ```js
 import { createStore, where } from './tinyop.js'
 
-const store = createStore({ spatialGridSize: 100 })
+const store = createStore()
 
-// Create typed entities with any schema
-const a = store.create('typeA', { x: 100, y: 200, value: 100, tag: 'foo' })
-store.create('typeA', { x: 115, y: 210, value: 50, tag: 'bar' })
-store.create('typeB', { x: 400, y: 300, value: 50, tag: 'baz' })
+// Entities are plain objects — any shape, any fields
+const a = store.create('sensor', { location: 'floor-3', value: 42, active: true })
+const b = store.create('sensor', { location: 'floor-1', value: 18, active: false })
+const c = store.create('threshold', { min: 20, max: 80, channel: 'floor-3' })
 
-// Spatial query — grid-indexed, finds entities near a point
-const nearby = store.near('typeA', a.x, a.y, 80).all()
+// Retrieve by type — O(1), no scan
+const sensors = store.find('sensor').all()
 
-// Compound filter — multiple conditions combined
-const filtered = store.find('typeA', where.and(
-  where.eq('tag', 'bar'),
-  where.gt('value', 0)
-)).sort('value').all()
+// Compound filter — multiple conditions, cached after first call
+const active = store.find('sensor', where.and(
+  where.eq('active', true),
+  where.gt('value', 20)
+)).all()
 
 // React to changes
-store.on('delete', e => console.log(`${e.item.type} removed`))
+store.on('update', ({ id, item, old }) => {
+  console.log(`${id}: ${old.value} → ${item.value}`)
+})
 
-// Atomic updates
-store.update(nearby[0].id, { value: 0 })
-store.delete(nearby[0].id)
+// Mutations merge changes and maintain all indexes
+store.update(a.id, { value: 55 })
+store.set(b.id, 'active', true)
+store.increment(a.id, 'value', 3)
 ```
-
-In a vanilla implementation, the equivalent store infrastructure — type indexes, spatial grid, event emitter, compound filtering — is **40–80 lines before you write any application logic**. With tinyop it's two lines of setup. For files where entity management is the main job, that's typically a **40–75% reduction in meaningful lines**.
 
 ---
 
-## Why tinyop
+## What it does
 
-Most JS data libraries are either key-value caches (fast reads, no query model) or full query engines (powerful, heavy). Neither fits the entity-component pattern well.
+**Type indexing.** Every entity belongs to a type. The type index is maintained on every write. `store.find('sensor')` returns all sensors without scanning the full item set — the index hands back the Set directly.
 
-tinyop is built specifically for systems where you need to:
+**Compound queries with a cache.** `where.eq`, `where.gt`, `where.and`, `where.or` and the rest build predicates with stable string keys. The first call scans; every subsequent call with the same predicate returns a frozen result object in under 0.01ms. Writes evict only the cache entries whose predicate fields overlap with the changed fields — a write to `value` leaves `location` and `active` queries warm.
 
-- Store thousands of typed entities and retrieve them by type instantly
-- Find entities within a spatial radius — without scanning the whole set
-- Filter with compound predicates and chain results
-- React to changes through a lightweight event system
-- Run transactions that roll back cleanly on failure
+**Spatial indexing.** Entities with `x` and `y` coordinates are tracked in a grid cell index. `store.near(type, x, y, radius)` searches only the cells that intersect the radius, filtered to the given type, sorted by distance. Non-spatial writes skip the spatial index entirely.
 
-tinyop handles typed entities, spatial queries, compound filters, and change events — the infrastructure you'd otherwise rebuild for every game, simulation, or collaborative app that needs to answer "what things are near here, and which ones match these conditions?"
+**Live views.** `store.view(type, predicate)` wraps a query in a cached result that recomputes automatically when relevant entities change. Between writes the result is returned directly — no scan, no predicate evaluation. Views support spatial recentering with a movement threshold.
 
-It's not a database or a framework. It's a small predictable layer: store entities with types, query by proximity and properties, react to changes, keep operations atomic.
+**Events.** `on('create' | 'update' | 'delete' | 'change' | 'batch', callback)` — subscribe to any write. Events include the item and its previous state. Unsubscribe by calling the returned function.
 
-It wins on **mixed workloads** — the benchmark that reflects real application loops where creates, reads, updates, and deletes happen together.
+**Transactions.** `store.transaction(() => { ... })` — all-or-nothing. Any throw rolls back every write in the block.
+
+**Functional updaters.** `store.update(id, old => ({ value: old.value * 2 }))` — derive the next state from current state atomically.
+
+---
+
+## How it works
+
+The write path in `w()` makes decisions based on what is actually needed:
+
+- The changed-field Set is only constructed if the query cache for that type has entries — if nothing is cached, field extraction is skipped entirely
+- The pre-mutation snapshot (`old` in update events) is only spread if an update or change listener is registered
+- The spatial index update is only run if `x` or `y` is among the changed fields
+- Transaction logging only runs when inside a transaction
+
+The result is a write path that pays for what it uses. A store with no listeners, no cached queries, and no spatial coordinates is close to the cost of a bare Map mutation.
 
 ---
 
 ## Benchmarks
 
-All benchmarks run on Node v22, Intel Xeon Platinum 8370C, median of 15 runs. Compared against LokiJS, NodeCache, MemoryCache, Lodash collections, Immutable.js, and raw Array/Object stores.
+All benchmarks: Node v22, Intel Xeon Platinum 8370C, median of 30 runs.
 
-> **Hardware variance.** Absolute numbers scale with your CPU — an AMD FX-6350 scores roughly half these figures. What stays stable across machines is the *relative ordering*. Run `node bench.js` to measure on your own hardware.
+> **Hardware variance.** Absolute numbers scale with your CPU — the relative ordering is what stays stable. Run `node bench.js` to measure on your own hardware.
 
-### Mixed workload — 10,000 operations (40% read, 20% update, 20% simple find, 20% compound find)
-
-| Library | ops/sec |
-|---|---|
-| **tinyop** | **115,978** |
-| LokiJS | 85,354 |
-| QuickLRU | 26,588 |
-| MemoryCache | 26,404 |
-| Lodash | 26,161 |
-| NodeCache | 24,704 |
-| Immutable | 18,878 |
-| Array Store | 16,995 |
-| Object Store | 9,004 |
-
-tinyop leads this category. The closest competitor is LokiJS at 85,354 ops/sec — a ~36% margin. LokiJS has a native B-tree field index that gives it an advantage on compound queries specifically; tinyop closes that gap with an LRU query cache (128 entry) that promotes frequently-used predicates to sub-0.01ms lookup. Every other library trails by 4× or more.
-
-The mixed workload is the benchmark that matters. Isolated read or write microbenchmarks favour specialised structures — real systems don't run isolated operations.
-
-### Create performance — 10,000 items
+### Mixed workload — 10,000 operations (40% read · 20% update · 20% find · 20% compound find)
 
 | Library | ops/sec |
 |---|---|
-| **tinyop** | **1,885K** |
-| Lodash | 1,412K |
-| LokiJS | 1,280K |
-| QuickLRU | 1,193K |
-| Array Store | 1,152K |
-| Object Store | 693K |
+| **tinyop (ref)** | **2,732,606** |
+| **tinyop (safe get)** | **1,900,991** |
+| LokiJS | 77,456 |
+| Lodash | 23,770 |
+| MemoryCache | 24,077 |
+| QuickLRU | 23,507 |
+| NodeCache | 22,885 |
+| Immutable | 17,803 |
+| Array Store | 15,635 |
+| Object Store | 8,104 |
 
-tinyop leads creates, beating LokiJS by ~47%. The counter-based id generator (replacing `Date.now() + Math.random()`) and a single `Date.now()` call per write account for most of the improvement.
+The mixed workload is the one that reflects real usage — isolated microbenchmarks favour specialised structures. tinyop leads by 24× over LokiJS and more than 79× over every other library in this category.
+The headline improvement from earlier versions is primarily from v3.5 field-aware cache invalidation. In a mixed workload, writes previously evicted all cached queries for a type. With field-aware invalidation, a write to hp leaves zone and active queries warm — the cache hit rate on the query-heavy portion of the workload increases substantially.
 
-### Read performance — 100,000 random reads
+### Create — 10,000 items
 
 | Library | ops/sec |
 |---|---|
-| **tinyop (ref)** | **111.7M** |
-| MemoryCache | 26.2M |
-| Object Store | 19.1M |
-| Lodash | 17.5M |
-| Array Store | 17.0M |
-| tinyop (safe get) | 13.8M |
-| QuickLRU | 11.8M |
-| LokiJS | 7.2M |
+| LokiJS | 1,958K |
+| **tinyop (ref)** | **1,663K** |
+| Lodash | 1,158K |
+| QuickLRU | 1,150K |
+| **tinyop (safe get)** | **1,149K** |
+| Array Store | 1,221K |
+| Object Store | 718K |
+
+### Read — 100,000 random reads
+
+| Library | ops/sec |
+|---|---|
+| **tinyop (ref)** | **109.3M** |
+| MemoryCache | 26.6M |
+| Object Store | 24.6M |
+| Lodash | 17.3M |
+| Array Store | 16.6M |
+| **tinyop (safe get)** | **12.6M** |
+| LokiJS | 7.9M |
 | Immutable | 3.5M |
-| NodeCache | 1.6M |
+| NodeCache | 1.4M |
 
-`store.getRef()` returns the live object directly — 111.7M ops/sec. `store.get()` returns a shallow copy for external safety — 13.8M ops/sec. Use `getRef()` in hot paths where you won't mutate the result.
+`store.getRef()` returns the live object directly — 109.3M ops/sec. `store.get()` returns a shallow copy — 12.6M ops/sec. Use `getRef()` in hot paths where you will not mutate the result.
 
-### Query performance — avg latency per query, 10,000 entities
+### Update — 50,000 updates
 
-| Library | Simple | Compound | View (repeat query) |
+| Library | ops/sec |
+|---|---|
+| Object Store | 7,091K |
+| Lodash | 6,525K |
+| Array Store | 6,397K |
+| QuickLRU | 4,483K |
+| MemoryCache | 4,082K |
+| **tinyop (ref)** | **2,709K** |
+| LokiJS | 2,080K |
+| **tinyop (safe get)** | **1,396K** |
+| Immutable | 980K |
+| NodeCache | 607K |
+
+Isolated update microbenchmarks favour raw stores that do nothing beyond setting a property. Each tinyop write maintains type and spatial indexes, derives changed fields for selective cache invalidation, and handles transaction logging. The mixed workload, where these investments pay back through cache-hit reads and queries, is the relevant comparison.
+
+### Query — avg latency per query, 10,000 entities
+
+| Library | Simple | Compound | Repeat |
 |---|---|---|---|
 | **tinyop** | **<0.01ms** | **<0.01ms** | **~0.00ms** |
-| LokiJS | 0.06ms | 0.37ms | 0.37ms |
-| MemoryCache | 1.1ms | N/A | 1.1ms |
-| Array Store | 1.89ms | N/A | 1.89ms |
-| Object Store | 7.8ms | N/A | 7.8ms |
+| LokiJS | 0.04ms | 0.41ms | 0.41ms |
+| MemoryCache | 0.64ms | N/A | 0.64ms |
+| Array Store | 2.18ms | N/A | 2.18ms |
+| Object Store | 5.26ms | N/A | 5.26ms |
 
-tinyop's LRU query cache promotes repeated queries — including compound `where.and`/`where.or` predicates — to frozen Q objects returned in under 0.01ms. **v3.4 adds views** (`store.view(type, predicate)`), which maintain a live cached result set that updates automatically when relevant entities change. Between writes, repeated access to a view returns the cached array in O(1) — latency drops below measurable threshold after the first evaluation. Views also support spatial recentering without recomputation when movement stays within a configured threshold.
+LokiJS is the only other library with native compound operator support. Every repeat query pays 0.41ms regardless of what changed. Tinyop's field-aware invalidation keeps unrelated predicates warm, so repeated access between writes is effectively free.
 
-LokiJS is the only other library that supports compound operators natively, at 0.37ms for the complex path — and every repeat query pays that cost again.
+### Spatial — avg per query, 10,000 points
 
-### Other categories
-
-| Category | tinyop | Fastest overall |
+| | Unfiltered | Filtered |
 |---|---|---|
-| Update (50k) | 3,522K ops/sec | Array Store 6,747K |
-| Memory per item | ~667 bytes | LokiJS 565 bytes |
+| RBush | 0.008ms | — |
+| Flatbush | 0.008ms | — |
+| **tinyop** | **0.080ms** | **0.051ms** |
 
-### Spatial queries
+The filtered path is faster than unfiltered because the predicate prunes candidates before distance computation. For pure geometry without type filtering, RBush or Flatbush is faster. For `"all entities within range that match these conditions"` in one call, tinyop handles it natively.
 
-tinyop's spatial index is built for **entity queries**, not raw geometry throughput. `store.near('typeA', x, y, radius)` searches only the typeA index — in a mixed-type store this eliminates 50–90% of candidates before any distance calculation. With v3.4, spatial queries can be wrapped in views that recenter efficiently without rebuilding the result set when movement stays within a configured threshold.
+### Memory — per 10,000 items
 
-For pure geometry performance, dedicated spatial libraries are faster: RBush at ~0.010ms vs tinyop at ~0.110ms per query. If your workload is purely geometric without type filtering, RBush or Flatbush is the right choice. If you need `"find all entities within range that match these conditions"` in one call, tinyop handles it natively — type filtering and proximity search happen in a single pass, with O(1) view access on repeated queries.
+| Library | Per item |
+|---|---|
+| Object Store | 572B |
+| **tinyop** | **~601B** |
+| Array Store | 637B |
+| LokiJS | 699B |
+| NodeCache | 1.04KB |
 
 ---
 
@@ -163,7 +198,7 @@ npm install tinyop
 import { createStore, where } from 'tinyop'
 ```
 
-Or copy a single file into your project — no build step, no package manager required:
+Or drop a single file into your project — no build step, no package manager:
 
 ```bash
 curl -O https://raw.githubusercontent.com/Baloperson/TinyOp/main/tinyop.js
@@ -173,16 +208,14 @@ curl -O https://raw.githubusercontent.com/Baloperson/TinyOp/main/tinyop.js
 
 ## API
 
-### Creating a store
+### Store configuration
 
 ```js
 const store = createStore({
-  spatialGridSize: 100,                          // grid cell size for spatial index (default 100)
-  types: new Set(['foo', 'bar', 'baz']),         // optional type validation
-  defaults: {
-    foo: { count: 0, active: true }              // default props per type
-  },
-  idGenerator: () => customId()                  // optional custom ID function
+  spatialGridSize: 100,          // grid cell size for spatial index (default: 100)
+  types: new Set(['a', 'b']),    // optional: restrict to known types
+  defaults: { a: { count: 0 } },// optional: default fields per type
+  idGenerator: () => myId()      // optional: custom ID function
 })
 ```
 
@@ -190,189 +223,186 @@ const store = createStore({
 
 ```js
 // create — returns the new entity
-const item = store.create('foo', { x: 100, y: 200, count: 5 })
+const item = store.create('foo', { x: 0, y: 0, value: 1 })
 
-// createMany — create multiple entities of the same type
-const items = store.createMany('foo', [
-  { x: 100, y: 200, count: 5 },
-  { x: 300, y: 400, count: 3 }
-])
+// createMany — same type, array of props
+const items = store.createMany('foo', [{ value: 1 }, { value: 2 }])
 ```
 
 ### Mutating entities
 
 ```js
-// update — merges changes, updates modified timestamp
-store.update(item.id, { count: 3 })
+// update — merges changes, returns updated entity
+store.update(id, { value: 2 })
 
-// functional updater — receives current state, returns changes
-store.update(item.id, old => ({ count: old.count - 1 }))
+// functional updater — current state in, changes out
+store.update(id, old => ({ value: old.value + 1 }))
 
-// set — single field shorthand
-store.set(item.id, 'count', 3)
+// set — single field
+store.set(id, 'value', 2)
 
-// increment — atomic field increment
-store.increment(item.id, 'count', 1)
+// increment — numeric field shorthand
+store.increment(id, 'value', 1)    // default delta: 1
+store.increment(id, 'value', -5)
 
-// delete — returns the deleted entity
-store.delete(item.id)
+// delete — returns the removed entity
+const removed = store.delete(id)
 store.deleteMany([id1, id2, id3])
 ```
 
 ### Batch operations
 
 ```js
-// batch.create — alias for createMany
-store.batch.create('foo', [{ count: 1 }, { count: 2 }])
-
-// batch.update — silent per-item writes, one 'batch' event
+// batch.update — silent per-item writes, one 'batch' event at the end
 store.batch.update([
-  { id: id1, changes: { count: 10 } },
-  { id: id2, changes: { count: 20 } }
+  { id: id1, changes: { value: 10 } },
+  { id: id2, changes: { value: 20 } },
 ])
 
-// batch.delete — alias for deleteMany
-store.batch.delete([id1, id2, id3])
+store.batch.delete([id1, id2])
+store.batch.create('foo', [{ value: 1 }, { value: 2 }])
 ```
 
 ### Reading entities
 
 ```js
-// safe get — returns a shallow copy
-const entity = store.get(id)
-
-// ref — returns the live object (faster, don't mutate)
-const entity = store.getRef(id)
-
-// pick — returns only specified fields (nested objects are deep-cloned)
-const fields = store.pick(id, ['x', 'y'])
-
-// exists
-if (store.exists(id)) { ... }
+store.get(id)            // shallow copy — safe to keep a reference to
+store.getRef(id)         // live object — faster, do not mutate
+store.pick(id, ['x','y'])// specific fields only; nested objects are deep-cloned
+store.exists(id)         // boolean
 ```
 
 ### Querying
 
 ```js
-// find by type with optional predicate
-const all = store.find('foo').all()
-const filtered = store.find('foo', e => e.count > 0).all()
+// All entities of a type
+store.find('foo').all()
 
-// spatial — find entities within radius, sorted by distance
-const nearby = store.near('foo', x, y, radius).all()
-const nearFiltered = store.near('foo', x, y, 100, e => e.count > 0).first()
+// Filtered
+store.find('foo', where.gt('value', 10)).all()
 
-// count shorthand
-const total = store.count('foo')
-const filteredCount = store.count('foo', e => e.count > 0)
+// Spatial — sorted by distance from point
+store.near('foo', x, y, radius).all()
+store.near('foo', x, y, radius, predicate).first()
 
-// query chain
-store.find('foo', where.gt('count', 0))
-  .sort('count')
-  .limit(5)
-  .offset(0)
-  .all()    // → array
-  .first()  // → first item or null
-  .last()   // → last item or null
-  .count()  // → number
-  .ids()    // → array of ids
+// Count shorthand
+store.count('foo')
+store.count('foo', where.eq('active', true))
+
+// Query chain — all methods return a new chainable Q
+store.find('foo', where.gt('value', 0))
+  .sort('value')        // ascending by field
+  .limit(10)
+  .offset(20)
+  .all()                // → Entity[]
+  .first()              // → Entity | null
+  .last()               // → Entity | null
+  .count()              // → number
+  .ids()                // → string[]
 ```
 
 ### `where` predicates
 
+All tagged predicates produce stable cache keys and benefit from field-aware invalidation. They compose without limit.
+
 ```js
-where.eq('status', 'active')
-where.ne('mode', 'disabled')
-where.gt('value', 50)
-where.gte('priority', 10)
+where.eq('status', 'ok')
+where.ne('status', 'error')
+where.gt('score', 100)
+where.gte('score', 100)
 where.lt('ttl', 0)
-where.lte('price', 100)
-where.in('category', ['a', 'b', 'c'])
-where.contains('name', 'pattern')
-where.startsWith('id', 'prefix-')
-where.exists('reference')
+where.lte('price', 50)
+where.in('tag', ['a', 'b', 'c'])
+where.exists('ref')
 
-// compose — tagged predicates produce stable cache keys and hit the hot query tier,
-// including when nested
-where.and(where.eq('status', 'active'), where.gt('value', 0))
-where.or(where.eq('mode', 'auto'), where.gte('priority', 5))
-where.and(where.or(where.eq('zone', '1'), where.eq('zone', '2')), where.gt('value', 0))
+// String matching — inline predicates, always scan (no cache key)
+where.contains('name', 'sub')
+where.startsWith('name', 'pre')
+where.endsWith('name', 'suf')
+
+// Composition — stable cache keys, field-aware invalidation applies to all fields
+where.and(where.eq('active', true), where.gt('score', 0))
+where.or(where.eq('tag', 'a'), where.eq('tag', 'b'))
+where.and(
+  where.or(where.eq('zone', 1), where.eq('zone', 2)),
+  where.gt('score', 0)
+)
 ```
-
-Note: `contains`, `startsWith`, and `endsWith` use inline predicates and do not produce cache keys — they always scan. Use `where.eq` or `where.in` for hot-path filtering where cache hits matter.
 
 ### Views
 
-Views maintain a live cached result that is recomputed automatically when relevant entities change. Between writes, repeated access is O(1) — the cached array is returned directly.
+A view is a live cached result. Between writes it returns the cached array directly — no scan. It recomputes lazily after any write that touches its type.
 
 ```js
-// basic view — cached until any 'foo' entity changes
-const activeItems = store.view('foo', where.gt('count', 0))
-activeItems()  // → array
+// Basic view
+const highValue = store.view('foo', where.gt('value', 100))
+highValue()   // → Entity[]
 
-// spatial view — entities near a point, optionally filtered
-const nearbyEnemies = store.view('enemy', where.eq('hostile', true), {
+// Spatial view — stays sorted by distance from origin
+const nearby = store.view('foo', where.eq('active', true), {
   spatial: true,
-  x: player.x,
-  y: player.y,
-  r: 200
+  x: origin.x,
+  y: origin.y,
+  r: 500,
 })
-nearbyEnemies()  // → sorted by distance
+nearby()   // → Entity[], sorted by distance
 
-// recenter — update the query origin
-// if movement is within threshold, the cached result is reused
-nearbyEnemies.recenter(player.x, player.y)
+// Recenter without forcing recompute
+// threshold: skip recompute if movement is within N units (default: 0)
+nearby.recenter(newX, newY)
 
-// threshold — only recomputes when the origin moves more than N units (default 0)
-const view = store.view('enemy', null, {
-  spatial: true, x: 0, y: 0, r: 200, threshold: 20
+const nearbyThresh = store.view('foo', null, {
+  spatial: true, x: 0, y: 0, r: 500, threshold: 25
 })
 
-// cleanup — removes the invalidation listener
-activeItems.destroy()
+// Remove the invalidation listener when the view is no longer needed
+highValue.destroy()
 ```
-
-Views are well-suited to game loops and reactive UI where the same query runs every frame. Writes invalidate only views whose type was affected — querying one type is unaffected by writes to another.
 
 ### Events
 
 ```js
-// subscribe — returns unsubscribe function
-const off = store.on('create', ({ id, item }) => { ... })
-store.on('update', ({ id, item, old }) => { ... })
-store.on('delete', ({ id, item }) => { ... })
-store.on('change', ({ type, id, item }) => { ... })  // all changes
-store.on('batch', ({ op, count }) => { ... })        // batch operations
+const off = store.on('create', ({ id, item }) => { })
+store.on('update', ({ id, item, old }) => { })   // old is present only when a listener was registered before the write
+store.on('delete', ({ id, item }) => { })
+store.on('change', ({ type, id, item }) => { })  // all writes
+store.on('batch',  ({ op, count }) => { })       // batch operations
 
-store.once('create', callback)  // fires once then removes itself
+store.once('create', callback)  // fires once, then removes itself
 
 off()  // unsubscribe
+store.off('update', callback)
 ```
 
 ### Transactions
 
 ```js
-// all-or-nothing — rolls back on throw
+// All writes in the block succeed together or roll back together on throw
 store.transaction(() => {
   store.update(id1, { value: 0 })
+  store.create('foo', { value: 1 })
   store.delete(id2)
-  store.create('foo', { x: 100, y: 200 })
+  // throw here → all three operations are reversed
 })
 ```
 
-### Stats and introspection
+### Introspection
 
 ```js
 store.stats()
 // {
-//   items: 1204,
-//   types: { foo: 847, bar: 356, baz: 1 },
-//   spatial: { cells: 42, coords: 1204 },
-//   listeners: { change: 3 }
+//   items: 1042,
+//   types: { foo: 800, bar: 242 },
+//   spatial: { cells: 36, coords: 1042 },
+//   listeners: { change: 2 }
 // }
 
-store.dump()   // plain object snapshot of all items (shallow copies)
-store.clear()  // removes everything, returns count
+store.dump()   // plain object snapshot — shallow copies of all entities
+store.clear()  // removes everything, returns previous count
+
+store.meta.get('key')
+store.meta.set('key', value)
+store.meta.config()   // returns a copy of the store configuration
 ```
 
 ---
@@ -383,40 +413,40 @@ store.clear()  // removes everything, returns count
 node --test test.js
 ```
 
-78 tests covering the core API, query cache correctness, and spatial index.
+78 tests covering the full API, query cache correctness, field-aware invalidation, and spatial index.
 
 ---
 
 ## tinyop+
 
-`tinyop+` wraps the base store with distribution primitives: vector clocks, an operation journal, WebSocket sync, and merge strategies. Same API, same spatial index, same query engine — with an opt-in layer for real-time and collaborative applications.
+`tinyop+` wraps the base store with distribution primitives: vector clocks, an operation journal, WebSocket sync, and merge strategies. The API is identical — switching requires changing one import line.
 
 ```js
 import { createStore } from './tinyop.plus.js'
 
-const store = createStore({ processId: 'client-1', syncUrl: 'wss://your-server' })
+const store = createStore({
+  processId: 'node-1',
+  syncUrl: 'wss://your-server',
+})
 
-// everything from tinyop works identically
-store.create('message', { text: 'hello', userId: 'alice' })
+// All tinyop operations work identically
+store.create('msg', { text: 'hello', from: 'alice' })
 
-// plus: export/import operations for sync
+// Distribution layer
 const snapshot = store.sync.export(lastSyncTimestamp)
 const { applied } = store.sync.import(remoteSnapshot)
 
-// vector clock
-store.clock.current()  // → local counter
-store.clock.get()      // → { 'client-1': 42, 'client-2': 38 }
+store.clock.current()    // → local counter
+store.clock.get()        // → { 'node-1': 42, 'node-2': 38 }
 
-// operation journal
-store.journal.list()                          // → all recorded ops
+store.journal.list()
 store.journal.query({ type: 'create', since: timestamp })
-store.journal.on(op => sendToServer(op))      // stream ops as they happen
+store.journal.on(op => sendToServer(op))
 
-// merge two stores (e.g. after offline period)
-store.merge(otherStore, 'timestamp')          // last-write-wins by modified timestamp
+store.merge(otherStore, 'timestamp')   // last-write-wins by modified timestamp
 ```
 
-### Distribution benchmark (Node v24, Intel Xeon Platinum 8370C)
+### Distribution benchmark — Node v24, Xeon Platinum 8370C
 
 | Operation | Speed |
 |---|---|
@@ -426,36 +456,47 @@ store.merge(otherStore, 'timestamp')          // last-write-wins by modified tim
 | Export (1K ops) | 745K ops/sec |
 | Affine batch apply (10K items) | 415M items/sec |
 
-Memory overhead for distribution: **+81%** per item (~473 bytes → ~856 bytes) due to the operation journal. The journal is capped at 10,000 entries by default and is only allocated when you use `tinyop+`.
+Memory overhead: **+81%** per item (~473B → ~856B) from the operation journal, capped at 10,000 entries by default and only allocated when using `tinyop+`.
 
 ---
 
 ## Design philosophy
 
-**One file.** Copy it in, import it, use it. No transitive dependencies to audit, no build pipeline to configure, no version conflicts.
+**One file.** Copy it in, import it, use it. No transitive dependencies, no build pipeline, no version conflicts. The source is readable in one sitting.
 
-**Optimised for mixed workloads.** Microbenchmark winners (Lodash, MemoryCache) are specialised — they do one thing fast. Real systems do everything at once. tinyop is designed for that.
+**Use information that is already there.** Every optimisation in tinyop follows this single principle rather than adding new state:
 
-**Spatial and type indexing are first-class.** Not an afterthought or plugin. The grid cell index and type index are maintained on every write and queried together. `store.near('typeA', x, y, r)` is one call — type filtering and proximity search happen in a single pass.
+- Predicate keys encode their field names — writes use this to evict only the cache entries that could have changed, leaving unrelated queries warm (v3.5)
+- The changed-field set computed per write is passed to the spatial index — non-spatial writes skip the grid cell lookup entirely (v3.5.1)
+- The entity-per-cell invariant means spatial candidate collection never produces duplicates — `Set` is replaced with `Array` in the hot query path (v3.5.1)
+- The query cache state and listener registry are checked before constructing objects — field Sets, snapshot spreads, and redundant Map writes are skipped when their results would not be used (v3.6)
 
-**Hot/cold query cache.** Repeated `find()` calls with the same predicate — including compound `where.and`/`where.or` chains — are promoted to a hot tier and return in under 0.01ms. Writes invalidate only the cache entries for the affected type, so querying one type is unaffected by writes to another. The cache is transparent: no configuration, no manual invalidation.
+**Optimised for mixed workloads.** The write path invests in indexes and cache maintenance. The read path collects the return on that investment. Workloads that only write and never query see overhead; workloads that mix reads, writes, and queries see the largest gains.
 
-**Views for zero-cost repeat access.** `store.view()` wraps a query in a live cached result. Between writes the cached array is returned directly — no scan, no predicate evaluation. Views support spatial recentering with a movement threshold, making them suitable for game loops where the query origin changes every frame but the result set doesn't need to.
-
-**Two tiers with one API.** `tinyop.js` is the foundation — no distribution overhead, pure local performance. `tinyop+` is the ecosystem — distribution, sync, journaling — built on top of the same store. Switching between them requires changing one import line.
+**Two tiers, one API.** `tinyop.js` is the foundation — pure local performance with no distribution overhead. `tinyop+` is the distribution layer built on top. Switching is one import line. Downgrading is the same.
 
 ---
 
 ## Limitations
 
-- **In-memory only.** No persistence built in. For persistence, serialize `store.dump()` to localStorage, IndexedDB, or your backend. `tinyop+` makes this easier with `store.checkpoint()`.
-- **Single-process.** The base store has no built-in sync. Use `tinyop+` for multi-client or multi-process scenarios.
-- **No schema enforcement by default.** Pass `types` to the store config for runtime type validation. Field types are not validated — tinyop is not a typed database.
-- **Read performance trades off for write safety.** `store.get()` returns a shallow copy to prevent external mutation. Use `store.getRef()` for the live reference when performance matters and you won't mutate it.
-- **Query cache overhead on write-heavy workloads.** The hot cache adds a small overhead per write to maintain per-type version counters. Workloads that are predominantly writes with few repeated queries see a modest regression versus a bare Map store. Use inline predicates (`e => e.count > 0` rather than `where.gt('count', 0)`) to bypass the hot tier when needed.
-- **Small stores with non-repeated queries see no cache benefit.** The hot/cold cache pays off when the same predicate is called multiple times between writes. For one-shot queries over a handful of entities, a plain Map is faster.
-- **Transactions don't isolate reads.** Reads inside a transaction see the partially-committed state — you may observe intermediate values if the transaction modifies entities before completing.
-- **Cache invalidation is per-type, not per-predicate.** Any write to a type clears all cached queries for that type, including those whose results wouldn't change. In write-heavy workloads with many distinct predicates, cache churn can outweigh cache benefit.
-- **Views recompute on any write to their type.** The cached result is valid until a relevant entity changes, then recomputed lazily on next access. Views are not persistent background caches.
-- **NaN/Infinity are valid coordinates.** Validate spatial inputs yourself — tinyop does not reject them and they will produce incorrect spatial query results.
-- **`__proto__` is a valid key.** Property names are not sanitized. Avoid using prototype-reserved names as entity field names.
+- **In-memory only.** Serialize `store.dump()` to localStorage, IndexedDB, or a backend for persistence. `tinyop+` simplifies this with `store.checkpoint()`.
+- **Single-process.** The base store has no sync. Use `tinyop+` for multi-client or multi-process scenarios.
+- **No schema enforcement by default.** Pass `types` to `createStore` for runtime type validation. Field types are not validated.
+- **`store.get()` returns a shallow copy.** Prevents external mutation of stored state. Use `store.getRef()` when the copy overhead matters and you will not mutate the result.
+- **Field-aware invalidation applies only to tagged predicates.** Inline predicates (`e => e.value > 0`) carry no field information and are evicted on any write to their type. Use `where.gt('value', 0)` to benefit from selective invalidation.
+- **`old` in update events reflects pre-write state only when a listener is registered.** The snapshot is not computed unless something will consume it.
+- **Writes that include `x` or `y` always run the full spatial update.** Writes to other fields skip the spatial block.
+- **Views recompute lazily after any write to their type.** The cached result stays valid between writes; it recomputes on the next read after a write.
+- **Transactions do not isolate reads.** Reads inside a transaction see the partially-committed state.
+- **NaN and Infinity are valid coordinates.** Validate spatial inputs before storing.
+- **`__proto__` is a valid field name.** Property names are not sanitized.
+
+---
+
+## Version history
+
+| Version | Change |
+|---|---|
+| v3.5 | Field-aware cache invalidation — writes evict only predicates whose fields intersect the changed fields |
+| v3.5.1 | Spatial skip on non-spatial writes; `Array` candidate collection in `near()`; batch `qbump`; `qi` size guard |
+| v3.6 | Adaptive computation — defer Set construction, snapshot spreads, and index updates to when they are actually needed |
