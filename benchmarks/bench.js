@@ -31,7 +31,16 @@ function makePRNG(seed) {
 }
 
 // ── harness ───────────────────────────────────────────────────────────────────
-const RUNS = 30  // take median across N runs to reduce noise
+// WARMUP: fn() is called WARMUP times before any timing begins.
+// This brings V8 to peak JIT for the specific call pattern being measured.
+// Without it early timed runs pay interpretation overhead — create benchmarks
+// measured 2.7× slower on run 1 vs steady-state, skewing the median even at
+// 500 runs. 20 warmup iterations is sufficient for all benchmark types tested.
+//
+// Seeds: warmup uses seed+0..WARMUP-1, timed runs use seed+WARMUP..WARMUP+RUNS-1.
+// No two invocations share a PRNG sequence so JIT can't lock into one pattern.
+const WARMUP = 20
+const RUNS   = 100   // sufficient once JIT is hot; 500 without warmup ≈ 120 with
 
 function time(fn, rand) {
   const t = performance.now()
@@ -45,7 +54,10 @@ function median(arr) {
 }
 
 function bench(fn, seed = 42) {
-  const times = Array.from({ length: RUNS }, (_, i) => time(fn, makePRNG(seed + i)))
+  // Warmup — not timed
+  for (let w = 0; w < WARMUP; w++) fn(makePRNG(seed + w))
+  // Timed — seeds continue past warmup range
+  const times = Array.from({ length: RUNS }, (_, i) => time(fn, makePRNG(seed + WARMUP + i)))
   const med = median(times)
   return { ms: med, times }
 }
@@ -62,11 +74,15 @@ const opsec  = (n, ms) => Math.round(n / (ms / 1000))
 const pad    = (s, n) => String(s).padEnd(n)
 
 // ── baseline stores ───────────────────────────────────────────────────────────
+// Counter-based IDs instead of Date.now()+Math.random() so V8 sees stable
+// string shapes and can specialise the Map.get hidden-class profile.
+let _id = 0
+const nextId = () => String(++_id)
 
 class ArrayStore {
   constructor() { this.items = []; this.byId = new Map() }
   create(type, props = {}) {
-    const id = props.id || `${Date.now()}-${Math.random()}`
+    const id = props.id || nextId()
     const item = { id, type, ...props, created: Date.now() }
     this.items.push(item); this.byId.set(id, item); return item
   }
@@ -81,7 +97,7 @@ class ArrayStore {
 class ObjectStore {
   constructor() { this.items = {} }
   create(type, props = {}) {
-    const id = props.id || `${Date.now()}-${Math.random()}`
+    const id = props.id || nextId()
     this.items[id] = { id, type, ...props, created: Date.now() }; return this.items[id]
   }
   get(id)       { return this.items[id] ?? null }
@@ -104,9 +120,6 @@ function buildLibraries() {
   libs.set('Array Store',  () => new ArrayStore())
   libs.set('Object Store', () => new ObjectStore())
 
-  // LokiJS
-  
-  //  store $loki as id in wrapper so the rest of the harness works uniformly
   if (Loki) libs.set('LokiJS', () => {
     const db = new Loki('bench.db')
     const colls = {}
@@ -115,7 +128,7 @@ function buildLibraries() {
     return {
       create(type, props = {}) {
         const item = getOrAdd(type).insert({ ...props, type })
-        item.id = String(item.$loki)           // normalise id field
+        item.id = String(item.$loki)
         byId.set(item.id, { coll: getOrAdd(type), loki: item.$loki })
         return item
       },
@@ -139,13 +152,12 @@ function buildLibraries() {
     }
   })
 
-  // NodeCache
   if (NodeCache) libs.set('NodeCache', () => {
     const cache = new NodeCache({ stdTTL: 0, checkperiod: 0 })
     const meta  = new Map()
     return {
       create(type, props = {}) {
-        const id = props.id || `${Date.now()}-${Math.random()}`
+        const id = props.id || nextId()
         const item = { id, type, ...props, created: Date.now() }
         meta.set(id, item); cache.set(id, item); return item
       },
@@ -158,13 +170,12 @@ function buildLibraries() {
     }
   })
 
-  // MemoryCache
   if (MemoryCache) libs.set('MemoryCache', () => {
     const cache = new MemoryCache.Cache()
     const meta  = new Map()
     return {
       create(type, props = {}) {
-        const id = props.id || `${Date.now()}-${Math.random()}`
+        const id = props.id || nextId()
         const item = { id, type, ...props, created: Date.now() }
         meta.set(id, item); cache.put(id, item); return item
       },
@@ -177,13 +188,12 @@ function buildLibraries() {
     }
   })
 
-  // QuickLRU
   if (QuickLRU) libs.set('QuickLRU', () => {
     const cache = new QuickLRU({ maxSize: 200000 })
     const meta  = new Map()
     return {
       create(type, props = {}) {
-        const id = props.id || `${Date.now()}-${Math.random()}`
+        const id = props.id || nextId()
         const item = { id, type, ...props, created: Date.now() }
         meta.set(id, item); cache.set(id, item); return item
       },
@@ -196,12 +206,11 @@ function buildLibraries() {
     }
   })
 
-  // Lodash
   if (lodash) libs.set('Lodash', () => {
     const items = []; const byId = new Map()
     return {
       create(type, props = {}) {
-        const id = props.id || `${Date.now()}-${Math.random()}`
+        const id = props.id || nextId()
         const item = { id, type, ...props, created: Date.now() }
         items.push(item); byId.set(id, item); return item
       },
@@ -218,12 +227,11 @@ function buildLibraries() {
     }
   })
 
-  // Immutable.js
   if (immutable) libs.set('Immutable', () => {
     let map = immutable.Map()
     return {
       create(type, props = {}) {
-        const id = props.id || `${Date.now()}-${Math.random()}`
+        const id = props.id || nextId()
         const item = { id, type, ...props, created: Date.now() }
         map = map.set(id, item); return item
       },
@@ -271,7 +279,6 @@ function benchRead(libs) {
   const N = 100_000
   for (const [name, factory] of libs) {
     try {
-      // pre-build store outside timed section
       const store = factory(); const ids = []
       for (let i = 0; i < 1000; i++) {
         const item = store.create('test', { value: i }); ids.push(item.id)
@@ -316,27 +323,31 @@ function benchQuery(libs) {
   for (const [name, factory] of libs) {
     try {
       const store = factory()
+      // Deterministic setup — score via PRNG not Math.random()
+      const setupRand = makePRNG(999)
       for (let i = 0; i < 10_000; i++)
-        store.create('test', { value: i, category: i % 10, active: i % 2 === 0, score: Math.random() * 100 })
+        store.create('test', { value: i, category: i % 10, active: i % 2 === 0, score: setupRand() * 100 })
 
       const istinyop = name.includes('tinyop')
       const isLoki    = name === 'LokiJS'
 
-      // simple
+      // Build predicates once — reused across all warmup + timed invocations
+      const simplePred  = istinyop ? where.and(where.eq('category', 5), where.eq('active', true)) : null
+      const complexPred = istinyop ? where.and(where.gt('value', 5000), where.in('category', [2,4,6,8]), where.eq('active', true)) : null
+
       const { ms: sMs } = bench(() => {
         for (let i = 0; i < 100; i++) {
-          if (istinyop) store.find('test', where.and(where.eq('category', 5), where.eq('active', true)))
+          if (istinyop) store.find('test', simplePred)
           else store.find('test', { category: 5, active: true })
         }
       })
 
-      // complex (compound operators)
       let cStr = 'N/A'
       if (istinyop || isLoki) {
         const { ms: cMs } = bench(() => {
           for (let i = 0; i < 100; i++) {
             if (istinyop)
-              store.find('test', where.and(where.gt('value', 5000), where.in('category', [2,4,6,8]), where.eq('active', true)))
+              store.find('test', complexPred)
             else
               store.find('test', { value: { $gt: 5000 }, category: { $in: [2,4,6,8] }, active: true })
           }
@@ -350,13 +361,6 @@ function benchQuery(libs) {
 }
 
 function benchMixed(libs) {
-  // Mixed workload: mirrors a real game/collab loop
-  // 40% read  — get entity by id
-  // 20% write — update a field
-  // 20% simple find — query by type + one equality predicate
-  // 20% complex find — compound where (tinyop advantage territory)
-  // Store is pre-seeded with 1,000 entities; we do not create/delete in the loop
-
   console.log('\nMIXED WORKLOAD (10,000 operations)')
   console.log('    40% read  20% update  20% simple find  20% complex find')
   console.log('-'.repeat(60))
@@ -366,7 +370,7 @@ function benchMixed(libs) {
       const store = factory(); const ids = []
       for (let i = 0; i < 1000; i++) {
         const item = store.create('test', {
-          value: i, category: i % 10, active: i % 2 === 0, score: Math.random() * 100
+          value: i, category: i % 10, active: i % 2 === 0, score: i / 10
         })
         ids.push(item.id)
       }
@@ -374,31 +378,31 @@ function benchMixed(libs) {
       const isLoki    = name === 'LokiJS'
       const useRef    = name === 'tinyop (ref)'
 
+      // Build predicates once — not inside the timed loop
+      const simplePred  = istinyop ? where.eq('category', 5) : null
+      const complexPred = istinyop ? where.and(where.gt('value', 500), where.eq('active', true)) : null
+
       const { ms } = bench(rand => {
         for (let i = 0; i < N; i++) {
           const r = rand()
           if (r < 0.4) {
-            // read
             const id = ids[rand() * ids.length | 0]
             useRef ? store.getRef(id) : store.get ? store.get(id) : store.ref(id)
           } else if (r < 0.6) {
-            // update
             const id = ids[rand() * ids.length | 0]
             store.set ? store.set(id, { value: rand() * 1000 | 0 })
                       : store.update(id, { value: rand() * 1000 | 0 })
           } else if (r < 0.8) {
-            // simple find
             const cat = rand() * 10 | 0
-            if (istinyop) store.find('test', where.eq('category', cat))
+            if (istinyop) store.find('test', simplePred)
             else store.find('test', { category: cat })
           } else {
-            // complex find — compound predicates
             if (istinyop)
-              store.find('test', where.and(where.gt('value', 500), where.eq('active', true)))
+              store.find('test', complexPred)
             else if (isLoki)
               store.find('test', { value: { $gt: 500 }, active: true })
             else
-              store.find('test', { value: 500 })  // simple fallback for libs without operators
+              store.find('test', { value: 500 })
           }
         }
       })
@@ -437,19 +441,19 @@ async function benchSpatial() {
   console.log('\n  SPATIAL QUERY PERFORMANCE (avg over 100 queries, 10,000 points)')
   console.log('-'.repeat(60))
 
-  // tinyop
   const ts = createtinyop()
   const rand = makePRNG(1)
   for (let i = 0; i < 10_000; i++)
     ts.create('pt', { x: rand() * 1000, y: rand() * 1000, value: i })
 
-  const { ms: tsMs } = bench(() => { for (let i = 0; i < 100; i++) ts.near('pt', 500, 500, 100).all() })
-  console.log(`${pad('tinyop Spatial', 28)}: ${(tsMs/100).toFixed(3)}ms avg`)
+  // Build filtered predicate once — warmup compiles it before measurement
+  const filteredPred = where.gt('value', 5000)
 
-  const { ms: tsFMs } = bench(() => { for (let i = 0; i < 100; i++) ts.near('pt', 500, 500, 100, where.gt('value', 5000)).all() })
+  const { ms: tsMs }  = bench(() => { for (let i = 0; i < 100; i++) ts.near('pt', 500, 500, 100).all() })
+  const { ms: tsFMs } = bench(() => { for (let i = 0; i < 100; i++) ts.near('pt', 500, 500, 100, filteredPred).all() })
+  console.log(`${pad('tinyop Spatial', 28)}: ${(tsMs/100).toFixed(3)}ms avg`)
   console.log(`${pad('tinyop Spatial (filtered)', 28)}: ${(tsFMs/100).toFixed(3)}ms avg`)
 
-  // RBush
   if (RBush) {
     const tree = new RBush(); const pts = []
     const r2 = makePRNG(1)
@@ -462,7 +466,6 @@ async function benchSpatial() {
     console.log(`${pad('RBush', 28)}: ${(ms/100).toFixed(3)}ms avg`)
   }
 
-  // Flatbush
   if (Flatbush) {
     const idx = new Flatbush(10_000); const r3 = makePRNG(1)
     for (let i = 0; i < 10_000; i++) { const x = r3() * 1000, y = r3() * 1000; idx.add(x,y,x,y) }
@@ -477,7 +480,7 @@ async function benchSpatial() {
 console.log('='.repeat(70))
 console.log(' tinyop.JS BENCHMARK ')
 console.log('='.repeat(70))
-console.log(`Node ${process.version} | ${new Date().toLocaleTimeString()} | ${RUNS} runs, reporting median`)
+console.log(`Node ${process.version} | ${new Date().toLocaleTimeString()} | ${WARMUP} warmup + ${RUNS} timed runs, reporting median`)
 if (!global.gc) console.log('⚠  run with --expose-gc for memory metrics')
 console.log()
 
@@ -492,7 +495,6 @@ benchMixed(libs)
 await benchMemory(libs)
 await benchSpatial()
 
-// ── summary ───────────────────────────────────────────────────────────────────
 console.log('\n' + '='.repeat(70))
 console.log(' DONE')
 console.log('='.repeat(70))
