@@ -5,6 +5,7 @@ Thanks for taking the time to contribute. TinyOp is a small, focused library and
 ## Contributor License Agreement
 
 **Before any contribution can be merged, you must agree to the following:**
+If you are not comfortable with these terms, please open an issue to discuss the contribution rather than submitting a PR:
 
 By submitting a pull request, issue fix, or any other contribution to this repository, you agree that:
 
@@ -13,7 +14,7 @@ By submitting a pull request, issue fix, or any other contribution to this repos
 3. Your contribution remains available under the GPL-3.0 license that governs this project.
 4. You understand that the maintainer may in future offer the software under additional license terms (such as a commercial license) and that your contribution may be included under those terms.
 
-This CLA exists to preserve the maintainer's ability to dual-license the project in the future without needing to track down every contributor for permission. If you are not comfortable with these terms, please open an issue to discuss the contribution rather than submitting a PR.
+This CLA exists to preserve the maintainer's ability to dual-license the project in the future without needing to track down every contributor for permission. 
 Note: This is standard for projects that may dual-license. Individual contributors retain copyright over their work, you're just granting permission for it to be used in this project under both GPL and potential future commercial licenses.
 ---
 
