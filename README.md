@@ -108,10 +108,9 @@ All benchmarks: Node v22, Intel Xeon Platinum 8370C, median of 100 runs + 20 war
 
 
 The mixed workload is the one that reflects real usage.
-**TinyOp is 50-500× faster than every other library in real-world mixed workloads** 
-the gap widens dramatically after JIT warmup, which reflects long-running application behavior.
+The gap between tinyop and LokiJS widens after JIT warmup, which reflects long-running application behavior.
 
-The headline improvement over earlier versions is primarily from v3.5 field-aware cache invalidation. Before v3.5, every write evicted all cached queries for that type — every find in the 40% of mixed-workload operations paid the full scan cost. With field-aware invalidation, a write to `hp` leaves `zone` and `active` queries warm. In a workload with frequent writes and repeated queries, the cache hit rate on the query portion increases substantially and that directly multiplies throughput. 
+The improvement over earlier versions is primarily from v3.5 field-aware cache invalidation. Before v3.5, every write evicted all cached queries for that type — every find in the 40% of mixed-workload operations paid the full scan cost. With field-aware invalidation, a write to `hp` leaves `zone` and `active` queries warm. In a workload with frequent writes and repeated queries, the cache hit rate on the query portion increases substantially and that directly multiplies throughput. 
 
 ### Create — 10,000 items
 
