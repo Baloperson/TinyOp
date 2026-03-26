@@ -13,7 +13,8 @@ Core:   ~10kB  | ~190 lines
 Plus:   +4.6kB | +~24 lines
 Total:  ~14kB
 ```
-
+7kB Minified
+2.8kB Minified + Gzipped
 ---
 
 ## What this is
