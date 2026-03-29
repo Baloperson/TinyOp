@@ -83,6 +83,9 @@ The write path in `w()` makes decisions based on what is actually needed:
 
 The result is a write path that pays for what it uses. A store with no listeners, no cached queries, and no spatial coordinates is close to the cost of a bare Map mutation.
 
+## Practical guide
+To take advantage of tinyops cache, its a good idea to choose a abstraction level such that one entity is sparse in changes.
+
 ---
 
 ## Benchmarks
