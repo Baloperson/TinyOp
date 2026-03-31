@@ -1,5 +1,5 @@
 {
-  "name": "tinyop-benchmarks",
+  "name": "QueryOp-benchmarks",
   "version": "1.0.0",
   "description": "Benchmark suite for tinyset.js",
   "type": "module",
